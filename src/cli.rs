@@ -1,8 +1,8 @@
 use crate::disk::{self, read_channel_peer_data, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
-	PaymentInfoStorage, PeerManager,
+	ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount, NetworkGraph,
+	OnionMessenger, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -190,10 +190,9 @@ pub(crate) fn read_input(
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
-	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, ldk_data_dir: String, network: Network,
-	logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
-	default_config: Arc<Mutex<UserConfig>>,
+	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
+	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
 ) {
 	println!(
 		"\rLDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -1057,8 +1056,24 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 	println!("\r\n]");
 }
 
-fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage) {
-	print!("\r[");
+fn list_payments(
+	inbound_payments: &InboundPaymentInfoStorage, outbound_payments: &OutboundPaymentInfoStorage,
+) {
+	print!("[");
+	for (payment_hash, payment_info) in &inbound_payments.payments {
+		println!("");
+		println!("\t{{");
+		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
+		println!("\t\tpayment_hash: {},", payment_hash);
+		println!("\t\thtlc_direction: inbound,");
+		println!(
+			"\t\thtlc_status: {},",
+			match payment_info.status {
+				HTLCStatus::Pending => "pending",
+				HTLCStatus::Succeeded => "succeeded",
+				HTLCStatus::Failed => "failed",
+			}
+		);
 
 	let inbound_payments = &inbound_payments.payments;
 	if !inbound_payments.is_empty() {
@@ -1187,12 +1202,12 @@ fn open_channel(
 
 fn send_payment(
 	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
-	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
-	let payment_hash = PaymentHash((*invoice.payment_hash()).into_inner());
+	let payment_id = PaymentId((*invoice.payment_hash()).into_inner());
 	let payment_secret = Some(*invoice.payment_secret());
 	outbound_payments.payments.insert(
-		payment_hash,
+		payment_id,
 		PaymentInfo {
 			preimage: None,
 			secret: payment_secret,
@@ -1209,8 +1224,9 @@ fn send_payment(
 			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 		}
 		Err(e) => {
-			println!("\rERROR: failed to send payment: {:?}", e);
-			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+			println!("ERROR: failed to send payment: {:?}", e);
+			print!("> ");
+			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		}
 	};
@@ -1218,17 +1234,17 @@ fn send_payment(
 
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
-	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
+	let payment_id = PaymentId(Sha256::hash(&payment_preimage.0[..]).into_inner());
 
 	let route_params = RouteParameters::from_payment_params_and_value(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false),
 		amt_msat,
 	);
 	outbound_payments.payments.insert(
-		payment_hash,
+		payment_id,
 		PaymentInfo {
 			preimage: None,
 			secret: None,
@@ -1241,7 +1257,7 @@ fn keysend<E: EntropySource>(
 	match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
-		PaymentId(payment_hash.0),
+		payment_id,
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
@@ -1249,17 +1265,18 @@ fn keysend<E: EntropySource>(
 			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
 		}
 		Err(e) => {
-			println!("\rERROR: failed to send payment: {:?}", e);
-			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
+			println!("ERROR: failed to send payment: {:?}", e);
+			print!("> ");
+			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		}
 	};
 }
 
 fn get_invoice(
-	amt_msat: u64, inbound_payments: &mut PaymentInfoStorage, channel_manager: &ChannelManager,
-	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32, yuv_pixel: Option<Pixel>,
-	logger: Arc<disk::FilesystemLogger>,
+	amt_msat: u64, inbound_payments: &mut InboundPaymentInfoStorage,
+	channel_manager: &ChannelManager, keys_manager: Arc<KeysManager>, network: Network,
+	expiry_secs: u32, logger: Arc<disk::FilesystemLogger>,
 ) {
 	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,
