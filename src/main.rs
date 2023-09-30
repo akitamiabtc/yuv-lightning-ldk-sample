@@ -153,7 +153,7 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 	Arc<FilesystemLogger>,
 	SocketDescriptor,
 	Arc<ChannelManager>,
-	Arc<SimpleArcOnionMessenger<FilesystemLogger>>,
+	Arc<OnionMessenger>,
 	IgnoringMessageHandler,
 	Arc<KeysManager>,
 	Arc<YuvClient>,
@@ -179,7 +179,8 @@ pub(crate) type ChannelManager = SimpleArcChannelManager<
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-type OnionMessenger = SimpleArcOnionMessenger<FilesystemLogger>;
+type OnionMessenger =
+	SimpleArcOnionMessenger<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 	Arc<BitcoindClient>,
@@ -417,6 +418,13 @@ async fn handle_ldk_events(
 				payment.status = HTLCStatus::Failed;
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
+		}
+		Event::InvoiceRequestFailed { payment_id } => {
+			print!("\nEVENT: Failed to request invoice to send payment with id {}", payment_id);
+			print!("> ");
+			io::stdout().flush().unwrap();
+
+			// TODO: mark the payment as failed
 		}
 		Event::PaymentForwarded {
 			prev_channel_id,
@@ -917,7 +925,7 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 		Arc::new(DefaultMessageRouter {}),
-		IgnoringMessageHandler {},
+		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 	));
 	let mut ephemeral_bytes = [0; 32];

@@ -110,15 +110,10 @@ pub(crate) async fn periodic_sweep(
 					}
 					outputs.push(Readable::read(&mut file).unwrap());
 				}
-
-				let wallet = wallet.lock().await;
-				let Ok(destination_pubkey) = wallet.get_change_yuv_pubkey() else {
-					lightning::log_error!(logger, "Failed to get change YUV pubkey");
-					continue;
-				};
-				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
-				let tx_feerate =
-					bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Background);
+				let destination_address = bitcoind_client.get_new_address().await;
+				let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
+				let tx_feerate = bitcoind_client
+					.get_est_sat_per_1000_weight(ConfirmationTarget::ChannelCloseMinimum);
 
 				// We set nLockTime to the current height to discourage fee sniping.
 				let cur_height = channel_manager.current_best_block().height();

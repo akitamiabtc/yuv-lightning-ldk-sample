@@ -17,7 +17,7 @@ use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, Upda
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
 use lightning::onion_message::OnionMessagePath;
-use lightning::onion_message::{CustomOnionMessageContents, Destination, OnionMessageContents};
+use lightning::onion_message::{Destination, OnionMessageContents};
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
@@ -55,7 +55,7 @@ struct UserOnionMessageContents {
 	data: Vec<u8>,
 }
 
-impl CustomOnionMessageContents for UserOnionMessageContents {
+impl OnionMessageContents for UserOnionMessageContents {
 	fn tlv_type(&self) -> u64 {
 		self.tlv_type
 	}
@@ -668,7 +668,7 @@ pub(crate) fn poll_for_user_input(
 					let message_path = OnionMessagePath { intermediate_nodes, destination };
 					match onion_messenger.send_onion_message(
 						message_path,
-						OnionMessageContents::Custom(UserOnionMessageContents { tlv_type, data }),
+						UserOnionMessageContents { tlv_type, data },
 						None,
 					) {
 						Ok(()) => println!("\rSUCCESS: forwarded onion message to first hop"),
