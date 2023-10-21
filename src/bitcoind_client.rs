@@ -11,7 +11,6 @@ use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::util::address::Address;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::log_error;
-use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::Logger;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
@@ -310,13 +309,54 @@ impl BroadcasterInterface for BitcoindClient {
 	}
 }
 
-impl UtxoLookup for BitcoindClient {
-	fn get_utxo(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
-		// P2PGossipSync takes None for a UtxoLookup, so this will never be called.
-		todo!();
+impl WalletSource for BitcoindClient {
+	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
+		let utxos = tokio::task::block_in_place(move || {
+			self.handle.block_on(async move { self.list_unspent().await }).0
+		});
+		Ok(utxos
+			.into_iter()
+			.filter_map(|utxo| {
+				let outpoint = OutPoint { txid: utxo.txid, vout: utxo.vout };
+				match utxo.address.payload {
+					Payload::WitnessProgram { version, ref program } => match version {
+						WitnessVersion::V0 => WPubkeyHash::from_slice(program)
+							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
+							.ok(),
+						// TODO: Add `Utxo::new_v1_p2tr` upstream.
+						WitnessVersion::V1 => XOnlyPublicKey::from_slice(program)
+							.map(|_| Utxo {
+								outpoint,
+								output: TxOut {
+									value: utxo.amount,
+									script_pubkey: Script::new_witness_program(version, program),
+								},
+								satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
+									1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
+							})
+							.ok(),
+						_ => None,
+					},
+					_ => None,
+				}
+			})
+			.collect())
 	}
 
-	fn get_utxo_with_yuv(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
-		todo!()
+	fn get_change_script(&self) -> Result<Script, ()> {
+		tokio::task::block_in_place(move || {
+			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
+		})
+	}
+
+	fn sign_tx(&self, tx: Transaction) -> Result<Transaction, ()> {
+		let mut tx_bytes = Vec::new();
+		let _ = tx.consensus_encode(&mut tx_bytes).map_err(|_| ());
+		let tx_hex = hex_utils::hex_str(&tx_bytes);
+		let signed_tx = tokio::task::block_in_place(move || {
+			self.handle.block_on(async move { self.sign_raw_transaction_with_wallet(tx_hex).await })
+		});
+		let signed_tx_bytes = hex_utils::to_vec(&signed_tx.hex).ok_or(())?;
+		Transaction::consensus_decode(&mut signed_tx_bytes.as_slice()).map_err(|_| ())
 	}
 }
