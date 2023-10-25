@@ -226,6 +226,11 @@ async fn handle_ldk_events(
 				(tx, None)
 			};
 
+			// Sign the final funding transaction and give it to LDK, who will eventually broadcast it.
+			let signed_tx = bitcoind_client.sign_raw_transaction_with_wallet(funded_tx.hex).await;
+			assert_eq!(signed_tx.complete, true);
+			let final_tx: Transaction =
+				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
 			// Give the funding transaction back to LDK for opening the channel.
 			match channel_manager.funding_transaction_generated(
 				&temporary_channel_id,
