@@ -16,15 +16,14 @@ use eyre::bail;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, UpdateBalance};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
-use lightning::onion_message::OnionMessagePath;
-use lightning::onion_message::{Destination, OnionMessageContents};
+use lightning::onion_message::messenger::Destination;
+use lightning::onion_message::packet::OnionMessageContents;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::sign::{EntropySource, KeysManager};
 use lightning::util::config::UserConfig;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Writeable, Writer};
-use lightning_invoice::payment::pay_invoice;
 use lightning_invoice::{utils, Bolt11Invoice, Currency};
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
@@ -50,6 +49,7 @@ pub(crate) struct LdkUserInfo {
 	pub(crate) yuv_rpc_url: Option<String>,
 }
 
+#[derive(Debug)]
 struct UserOnionMessageContents {
 	tlv_type: u64,
 	data: Vec<u8>,
@@ -664,14 +664,15 @@ pub(crate) fn poll_for_user_input(
 						}
 					};
 					let destination = Destination::Node(intermediate_nodes.pop().unwrap());
-					let message_path = OnionMessagePath { intermediate_nodes, destination };
 					match onion_messenger.send_onion_message(
-						message_path,
 						UserOnionMessageContents { tlv_type, data },
+						destination,
 						None,
 					) {
-						Ok(()) => println!("\rSUCCESS: forwarded onion message to first hop"),
-						Err(e) => println!("\rERROR: failed to send onion message: {:?}", e),
+						Ok(success) => {
+							println!("SUCCESS: forwarded onion message to first hop {:?}", success)
+						}
+						Err(e) => println!("ERROR: failed to send onion message: {:?}", e),
 					}
 				}
 				"updatebalance" => {
@@ -1181,14 +1182,21 @@ fn open_channel(
 	peer_pubkey: PublicKey, channel_amt_sat: u64, config: UserConfig,
 	channel_manager: Arc<ChannelManager>, yuv_pixel: Option<Pixel>,
 ) -> Result<(), ()> {
-	match channel_manager.create_channel(
-		peer_pubkey,
-		channel_amt_sat,
-		0,
-		0,
-		yuv_pixel,
-		Some(config),
-	) {
+	let config = UserConfig {
+		channel_handshake_limits: ChannelHandshakeLimits {
+			// lnd's max to_self_delay is 2016, so we want to be compatible.
+			their_to_self_delay: 2016,
+			..Default::default()
+		},
+		channel_handshake_config: ChannelHandshakeConfig {
+			announced_channel,
+			negotiate_anchors_zero_fee_htlc_tx: with_anchors,
+			..Default::default()
+		},
+		..Default::default()
+	};
+
+	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, None, Some(config)) {
 		Ok(_) => {
 			println!("\rEVENT: initiated channel with peer {}. ", peer_pubkey);
 			Ok(())
@@ -1204,7 +1212,8 @@ fn send_payment(
 	channel_manager: &ChannelManager, invoice: &Bolt11Invoice,
 	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
-	let payment_id = PaymentId((*invoice.payment_hash()).into_inner());
+	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
+	let payment_hash = PaymentHash((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
 	outbound_payments.payments.insert(
 		payment_id,
@@ -1217,8 +1226,51 @@ fn send_payment(
 		},
 	);
 	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-	match pay_invoice(invoice, Retry::Timeout(Duration::from_secs(10)), channel_manager) {
-		Ok(_payment_id) => {
+
+	let mut recipient_onion = RecipientOnionFields::secret_only(*invoice.payment_secret());
+	recipient_onion.payment_metadata = invoice.payment_metadata().map(|v| v.clone());
+	let mut payment_params = match PaymentParameters::from_node_id(
+		invoice.recover_payee_pub_key(),
+		invoice.min_final_cltv_expiry_delta() as u32,
+	)
+	.with_expiry_time(
+		invoice.duration_since_epoch().as_secs().saturating_add(invoice.expiry_time().as_secs()),
+	)
+	.with_route_hints(invoice.route_hints())
+	{
+		Err(e) => {
+			println!("ERROR: Could not process invoice to prepare payment parameters, {:?}, invoice: {:?}", e, invoice);
+			return;
+		}
+		Ok(p) => p,
+	};
+	if let Some(features) = invoice.features() {
+		payment_params = match payment_params.with_bolt11_features(features.clone()) {
+			Err(e) => {
+				println!("ERROR: Could not build BOLT11 payment parameters! {:?}", e);
+				return;
+			}
+			Ok(p) => p,
+		};
+	}
+	let invoice_amount = match invoice.amount_milli_satoshis() {
+		None => {
+			println!("ERROR: An invoice with an amount is expected; {:?}", invoice);
+			return;
+		}
+		Some(a) => a,
+	};
+	let route_params =
+		RouteParameters::from_payment_params_and_value(payment_params, invoice_amount);
+
+	match channel_manager.send_payment(
+		payment_hash,
+		recipient_onion,
+		payment_id,
+		route_params,
+		Retry::Timeout(Duration::from_secs(10)),
+	) {
+		Ok(_) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
 			let amt_msat = invoice.amount_milli_satoshis().unwrap();
 			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
@@ -1237,7 +1289,7 @@ fn keysend<E: EntropySource>(
 	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
-	let payment_id = PaymentId(Sha256::hash(&payment_preimage.0[..]).into_inner());
+	let payment_id = PaymentId(Sha256::hash(&payment_preimage.0[..]).to_byte_array());
 
 	let route_params = RouteParameters::from_payment_params_and_value(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false),
@@ -1280,9 +1332,9 @@ fn get_invoice(
 ) {
 	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,
-		Network::Testnet => Currency::BitcoinTestnet,
 		Network::Regtest => Currency::Regtest,
 		Network::Signet => Currency::Signet,
+		Network::Testnet | _ => Currency::BitcoinTestnet,
 	};
 
 	let duration = SystemTime::now()
@@ -1327,7 +1379,7 @@ fn get_invoice(
 		}
 	};
 
-	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
+	let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
 	inbound_payments.payments.insert(
 		payment_hash,
 		PaymentInfo {

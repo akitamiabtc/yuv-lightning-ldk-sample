@@ -30,7 +30,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
-use lightning::onion_message::{DefaultMessageRouter, SimpleArcOnionMessenger};
+use lightning::onion_message::messenger::{DefaultMessageRouter, SimpleArcOnionMessenger};
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
@@ -159,12 +159,6 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 	lightning_block_sync::gossip::TokioSpawner,
 	Arc<lightning_block_sync::rpc::RpcClient>,
 	Arc<FilesystemLogger>,
-	SocketDescriptor,
-	Arc<ChannelManager>,
-	Arc<OnionMessenger>,
-	IgnoringMessageHandler,
-	Arc<KeysManager>,
-	Arc<YuvClient>,
 >;
 
 pub(crate) type PeerManager = SimpleArcPeerManager<
@@ -216,7 +210,22 @@ async fn handle_ldk_events(
 			funding_counterparty_pubkey,
 			..
 		} => {
-			let mut wallet = wallet.lock().await;
+			// Construct the raw transaction with one output, that is paid the amount of the
+			// channel.
+			let addr = WitnessProgram::from_scriptpubkey(
+				&output_script.as_bytes(),
+				match network {
+					Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
+					Network::Regtest => bitcoin_bech32::constants::Network::Regtest,
+					Network::Signet => bitcoin_bech32::constants::Network::Signet,
+					Network::Testnet | _ => bitcoin_bech32::constants::Network::Testnet,
+				},
+			)
+			.expect("Lightning funding tx should always be to a SegWit output")
+			.to_address();
+			let mut outputs = vec![HashMap::with_capacity(1)];
+			outputs[0].insert(addr, channel_value_satoshis as f64 / 100_000_000.0);
+			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
 
 			let (final_tx, yuv_proofs) = if let Some(funding_pixel) = funding_yuv_pixel {
 				let yuv_tx = wallet
@@ -575,6 +584,7 @@ async fn handle_ldk_events(
 			user_channel_id: _,
 			counterparty_node_id,
 			channel_capacity_sats: _,
+			channel_funding_txo: _,
 		} => {
 			println!(
 				"\rEVENT: Channel {} with counterparty {} closed due to: {:?}",
@@ -591,33 +601,7 @@ async fn handle_ldk_events(
 		}
 		Event::HTLCIntercepted { .. } => {}
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
-		Event::UpdateBalanceApplied(channel_id) => {
-			println!("\rEvent: Channel {} has applied the updated balances", channel_id);
-			print!("\r> ");
-			io::stdout().flush().unwrap();
-		}
-		Event::NewUpdateBalanceRequest { channel_id, request } => match request {
-			NewUpdateBalanceRequest::NewBalances {
-				updated_counterparty_msat,
-				updated_counterparty_yuv_luma,
-			} => {
-				println!(
-					"\rEvent: Counterparty has requested an update to the balances in channel: {}. \
-					 The new balances are: {} msat, {:?} yuv luma",
-					channel_id, updated_counterparty_msat, updated_counterparty_yuv_luma.map(|luma| luma.amount)
-				);
-				print!("\r> ");
-				io::stdout().flush().unwrap();
-			}
-			NewUpdateBalanceRequest::Revoke => {
-				println!(
-					"\rEvent: Channel {} has requested to revoke the update balances",
-					channel_id
-				);
-				print!("\r> ");
-				io::stdout().flush().unwrap();
-			}
-		},
+		Event::ConnectionNeeded { .. } => {}
 	}
 }
 
@@ -650,7 +634,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_port,
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
-		wallet_name,
+		args.network,
 		tokio::runtime::Handle::current(),
 		Arc::clone(&logger),
 	)
@@ -667,10 +651,10 @@ async fn start_ldk() {
 	let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
 	if bitcoind_chain
 		!= match args.network {
-			Network::Bitcoin => "main",
-			Network::Testnet => "test",
-			Network::Regtest => "regtest",
-			Network::Signet => "signet",
+			bitcoin::Network::Bitcoin => "main",
+			bitcoin::Network::Regtest => "regtest",
+			bitcoin::Network::Signet => "signet",
+			bitcoin::Network::Testnet | _ => "test",
 		} {
 		println!(
 			"\rChain argument ({}) didn't match bitcoind chain ({})",
@@ -940,7 +924,7 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
-		Arc::new(DefaultMessageRouter {}),
+		Arc::new(DefaultMessageRouter::new(Arc::clone(&network_graph))),
 		Arc::clone(&channel_manager),
 		IgnoringMessageHandler {},
 	));
@@ -1139,6 +1123,7 @@ async fn start_ldk() {
 			})
 		},
 		false,
+		|| Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap()),
 	));
 
 	// Regularly reconnect to channel peers.
