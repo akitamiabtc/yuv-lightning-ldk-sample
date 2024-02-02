@@ -57,6 +57,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -192,11 +193,11 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 >;
 
 async fn handle_ldk_events(
-	channel_manager: &Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
+	channel_manager: Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
 	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	bump_tx_event_handler: &BumpTxEventHandler,
+	bump_tx_event_handler: &BumpTxEventHandler, peer_manager: Arc<PeerManager>,
 	inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
+	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: Arc<FilesystemStore>,
 	network: Network, event: Event,
 ) {
 	match event {
@@ -601,7 +602,20 @@ async fn handle_ldk_events(
 		}
 		Event::HTLCIntercepted { .. } => {}
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
-		Event::ConnectionNeeded { .. } => {}
+		Event::ConnectionNeeded { node_id, addresses } => {
+			tokio::spawn(async move {
+				for address in addresses {
+					if let Ok(sockaddrs) = address.to_socket_addrs() {
+						for addr in sockaddrs {
+							let pm = Arc::clone(&peer_manager);
+							if cli::connect_peer_if_necessary(node_id, addr, pm).await.is_ok() {
+								return;
+							}
+						}
+					}
+				}
+			});
+		}
 	}
 }
 
@@ -1035,42 +1049,8 @@ async fn start_ldk() {
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
 	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
 	let fs_store_event_listener = Arc::clone(&fs_store);
-
-	if let Some(yuv_client) = yuv_client_opt.clone() {
-		let channel_manager = Arc::clone(&channel_manager);
-		let chain_monitor = Arc::clone(&chain_monitor);
-		let yuv_listener = yuv_client.clone();
-		tokio::spawn(async move {
-			loop {
-				let tx_ids_to_request = channel_manager.get_pending_yuv_txs();
-
-				if !tx_ids_to_request.is_empty() {
-					let pending_txs =
-						yuv_listener.get_list_raw_yuv_transactions(tx_ids_to_request).await;
-
-					if !pending_txs.is_empty() {
-						channel_manager.yuv_transactions_confirmed(pending_txs);
-					}
-				}
-
-				let tx_ids_to_request = chain_monitor.get_pending_yuv_txs();
-
-				if !tx_ids_to_request.is_empty() {
-					let pending_txs =
-						yuv_listener.get_list_raw_yuv_transactions(tx_ids_to_request).await;
-
-					if !pending_txs.is_empty() {
-						chain_monitor.yuv_transactions_confirmed(pending_txs);
-					}
-				}
-
-				tokio::time::sleep(Duration::from_secs(1)).await;
-			}
-		});
-	}
-
-	let event_handlers_wallet = wallet.clone();
-	let event_jandlers_default_config = default_config.clone();
+	let peer_manager_event_listener = Arc::clone(&peer_manager);
+	let network = args.network;
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
 		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
@@ -1079,18 +1059,19 @@ async fn start_ldk() {
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
 		let fs_store_event_listener = Arc::clone(&fs_store_event_listener);
-		let wallet = Arc::clone(&event_handlers_wallet.clone());
-		let default_config = Arc::clone(&event_jandlers_default_config);
-
+		let peer_manager_event_listener = Arc::clone(&peer_manager_event_listener);
 		async move {
 			handle_ldk_events(
-				&channel_manager_event_listener,
+				channel_manager_event_listener,
+				&bitcoind_client_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
 				&bump_tx_event_handler,
+				peer_manager_event_listener,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
-				&fs_store_event_listener,
+				fs_store_event_listener,
+				network,
 				event,
 				wallet,
 				default_config,
