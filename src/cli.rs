@@ -266,14 +266,15 @@ pub(crate) fn poll_for_user_input(
 						println!("\rERROR: openchannel has 2 required arguments: `openchannel peer_pubkey channel_amt_satoshis [--pixel <luma>:<chroma>] [--public] [--with-anchors] [--min-inbound-htlc]`");
 						continue;
 					}
-
-					let pubkey = match hex_utils::to_compressed_pubkey(peer_pubkey.unwrap()) {
-						Some(pubkey) => pubkey,
-						None => {
-							println!("\rError: invalid peer pubkey");
-							continue;
-						}
-					};
+					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
+					let (pubkey, peer_addr) =
+						match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
+							Ok(info) => info,
+							Err(e) => {
+								println!("{:?}", e.into_inner().unwrap());
+								continue;
+							},
+						};
 
 					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
 					if chan_amt_sat.is_err() {
@@ -304,9 +305,9 @@ pub(crate) fn poll_for_user_input(
 							"--with-anchors" | "--with-anchors=true" => with_anchors = true,
 							"--with-anchors=false" => with_anchors = false,
 							_ => {
-								println!("\rERROR: unknown parameter: {word}");
-								continue 'outer;
-							}
+								println!("ERROR: invalid boolean flag format. Valid formats: `--option`, `--option=true` `--option=false`");
+								continue;
+							},
 						}
 					}
 
@@ -340,9 +341,16 @@ pub(crate) fn poll_for_user_input(
 						chan_amt_sat.unwrap(),
 						config,
 						channel_manager.clone(),
-						yuv_pixel,
-					);
-				}
+					)
+					.is_ok()
+					{
+						let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+						let _ = disk::persist_channel_peer(
+							Path::new(&peer_data_path),
+							peer_pubkey_and_ip_addr,
+						);
+					}
+				},
 				"sendpayment" => {
 					let invoice_str = words.next();
 					if invoice_str.is_none() {
@@ -359,7 +367,7 @@ pub(crate) fn poll_for_user_input(
 							Err(e) => {
 								println!("ERROR: couldn't parse amount_msat: {}", e);
 								continue;
-							}
+							},
 						};
 					}
 
@@ -373,7 +381,7 @@ pub(crate) fn poll_for_user_input(
 							(amt, _) => {
 								println!("ERROR: Cannot process non-Bitcoin-denominated offer value {:?}", amt);
 								continue;
-							}
+							},
 						};
 						if user_provided_amt.is_some() && user_provided_amt != Some(amt_msat) {
 							println!("Amount didn't match offer of {}msat", amt_msat);
@@ -433,10 +441,10 @@ pub(crate) fn poll_for_user_input(
 							),
 							Err(e) => {
 								println!("ERROR: invalid invoice: {:?}", e);
-							}
+							},
 						}
 					}
-				}
+				},
 				"keysend" => {
 					let dest_pubkey = match words.next() {
 						Some(dest) => match hex_utils::to_compressed_pubkey(dest) {
@@ -444,26 +452,26 @@ pub(crate) fn poll_for_user_input(
 							None => {
 								println!("\rERROR: couldn't parse destination pubkey");
 								continue;
-							}
+							},
 						},
 						None => {
 							println!("\rERROR: keysend requires a destination pubkey: `keysend <dest_pubkey> <amt_msat>`");
 							continue;
-						}
+						},
 					};
 					let amt_msat_str = match words.next() {
 						Some(amt) => amt,
 						None => {
 							println!("\rERROR: keysend requires an amount in millisatoshis: `keysend <dest_pubkey> <amt_msat>`");
 							continue;
-						}
+						},
 					};
 					let amt_msat: u64 = match amt_msat_str.parse() {
 						Ok(amt) => amt,
 						Err(e) => {
 							println!("\rERROR: couldn't parse amount_msat: {}", e);
 							continue;
-						}
+						},
 					};
 					keysend(
 						&channel_manager,
@@ -473,7 +481,7 @@ pub(crate) fn poll_for_user_input(
 						&mut outbound_payments.lock().unwrap(),
 						Arc::clone(&fs_store),
 					);
-				}
+				},
 				"getoffer" => {
 					let offer_builder = channel_manager.create_offer_builder(String::new());
 					if let Err(e) = offer_builder {
@@ -501,7 +509,7 @@ pub(crate) fn poll_for_user_input(
 						// correspond with individual payments.
 						println!("{}", offer.unwrap());
 					}
-				}
+				},
 				"getinvoice" => {
 					let amt_str = words.next();
 					if amt_str.is_none() {
@@ -565,7 +573,7 @@ pub(crate) fn poll_for_user_input(
 					fs_store
 						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
 						.unwrap();
-				}
+				},
 				"connectpeer" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					if peer_pubkey_and_ip_addr.is_none() {
@@ -578,7 +586,7 @@ pub(crate) fn poll_for_user_input(
 							Err(e) => {
 								println!("\r{:?}", e.into_inner().unwrap());
 								continue;
-							}
+							},
 						};
 					if tokio::runtime::Handle::current()
 						.block_on(connect_peer_if_necessary(
@@ -590,13 +598,7 @@ pub(crate) fn poll_for_user_input(
 					{
 						println!("\rSUCCESS: connected to peer {}", pubkey);
 					}
-
-					let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
-					let _ = disk::persist_channel_peer(
-						Path::new(&peer_data_path),
-						peer_pubkey_and_ip_addr.unwrap(),
-					);
-				}
+				},
 				"disconnectpeer" => {
 					let peer_pubkey = words.next();
 					if peer_pubkey.is_none() {
@@ -610,7 +612,7 @@ pub(crate) fn poll_for_user_input(
 							Err(e) => {
 								println!("\rERROR: {}", e.to_string());
 								continue;
-							}
+							},
 						};
 
 					if do_disconnect_peer(
@@ -622,7 +624,7 @@ pub(crate) fn poll_for_user_input(
 					{
 						println!("\rSUCCESS: disconnected from peer {}", peer_pubkey);
 					}
-				}
+				},
 				"listchannels" => list_channels(&channel_manager, &network_graph),
 				"listpayments" => list_payments(
 					&inbound_payments.lock().unwrap(),
@@ -652,18 +654,18 @@ pub(crate) fn poll_for_user_input(
 						None => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						}
+						},
 					};
 					let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
 						Ok(peer_pubkey) => peer_pubkey,
 						Err(_) => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						}
+						},
 					};
 
 					close_channel(channel_id, peer_pubkey, channel_manager.clone());
-				}
+				},
 				"forceclosechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
@@ -688,18 +690,18 @@ pub(crate) fn poll_for_user_input(
 						None => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						}
+						},
 					};
 					let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
 						Ok(peer_pubkey) => peer_pubkey,
 						Err(_) => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						}
+						},
 					};
 
 					force_close_channel(channel_id, peer_pubkey, channel_manager.clone());
-				}
+				},
 				"nodeinfo" => node_info(&channel_manager, &peer_manager),
 				"listpeers" => list_peers(ldk_data_dir.clone()),
 				"signmessage" => {
@@ -715,7 +717,7 @@ pub(crate) fn poll_for_user_input(
 							&keys_manager.get_node_secret_key()
 						)
 					);
-				}
+				},
 				"sendonionmessage" => {
 					let path_pks_str = words.next();
 					if path_pks_str.is_none() {
@@ -733,7 +735,7 @@ pub(crate) fn poll_for_user_input(
 								println!("\rERROR: couldn't parse peer_pubkey");
 								errored = true;
 								break;
-							}
+							},
 						};
 						let node_pubkey = match PublicKey::from_slice(&node_pubkey_vec) {
 							Ok(peer_pubkey) => peer_pubkey,
@@ -741,7 +743,7 @@ pub(crate) fn poll_for_user_input(
 								println!("\rERROR: couldn't parse peer_pubkey");
 								errored = true;
 								break;
-							}
+							},
 						};
 						intermediate_nodes.push(node_pubkey);
 					}
@@ -753,14 +755,14 @@ pub(crate) fn poll_for_user_input(
 						_ => {
 							println!("\rNeed an integral message type above 64");
 							continue;
-						}
+						},
 					};
 					let data = match words.next().map(|s| hex_utils::to_vec(s)) {
 						Some(Some(data)) => data,
 						_ => {
 							println!("\rNeed a hex data string");
 							continue;
-						}
+						},
 					};
 					let destination = Destination::Node(intermediate_nodes.pop().unwrap());
 					match onion_messenger.send_onion_message(
@@ -770,66 +772,10 @@ pub(crate) fn poll_for_user_input(
 					) {
 						Ok(success) => {
 							println!("SUCCESS: forwarded onion message to first hop {:?}", success)
-						}
+						},
 						Err(e) => println!("ERROR: failed to send onion message: {:?}", e),
 					}
-				}
-				"updatebalance" => {
-					let channel_id_str = words.next();
-					if channel_id_str.is_none() {
-						println!("\rERROR: updatebalance requires a channel ID: `updatebalance <channel_id> <peer_pubkey>`");
-						continue;
-					}
-					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
-					if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
-						println!("\rERROR: couldn't parse channel_id");
-						continue;
-					}
-					let mut channel_id = [0; 32];
-					channel_id.copy_from_slice(&channel_id_vec.unwrap());
-
-					let peer_pubkey = match pubkey_from_input(&mut words) {
-						Some(value) => value,
-						None => continue,
-					};
-
-					let mut new_balance_msat = None;
-					if let Some(msat_raw) = words.next() {
-						let msat = match u64::from_str(msat_raw) {
-							Ok(msat) => msat,
-							Err(e) => {
-								println!("\rERROR: invalid new_balance_msat (u64): {}", e);
-								continue;
-							}
-						};
-
-						new_balance_msat = Some(msat);
-					}
-
-					let mut new_yuv_luma = None;
-					if let Some(luma_raw) = words.next() {
-						let luma = match u128::from_str(luma_raw) {
-							Ok(luma) => Luma::from(luma),
-							Err(e) => {
-								println!("\rERROR: invalid luma(u64): {}", e);
-								continue;
-							}
-						};
-
-						new_yuv_luma = Some(luma);
-					}
-
-					update_balance(
-						channel_id,
-						peer_pubkey,
-						new_balance_msat,
-						new_yuv_luma,
-						channel_manager.clone(),
-					);
-				}
-				"listnodes" => {
-					println!("\r{}", &network_graph)
-				}
+				},
 				"quit" | "exit" => break,
 				_ => println!("\rUnknown command. See \"help\" for available commands."),
 			}
@@ -1242,7 +1188,7 @@ pub(crate) async fn do_connect_peer(
 					return Ok(());
 				}
 			}
-		}
+		},
 		None => Err(()),
 	}
 }
@@ -1291,13 +1237,13 @@ fn open_channel(
 
 	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, None, Some(config)) {
 		Ok(_) => {
-			println!("\rEVENT: initiated channel with peer {}. ", peer_pubkey);
-			Ok(())
-		}
+			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
+			return Ok(());
+		},
 		Err(e) => {
-			println!("\rERROR: failed to open channel: {:?}", e);
-			Err(())
-		}
+			println!("ERROR: failed to open channel: {:?}", e);
+			return Err(());
+		},
 	}
 }
 
@@ -1335,7 +1281,7 @@ fn send_payment(
 			println!("Failed to parse invoice: {:?}", e);
 			print!("> ");
 			return;
-		}
+		},
 	};
 	outbound_payments.payments.insert(
 		payment_id,
@@ -1359,14 +1305,15 @@ fn send_payment(
 		Ok(_) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
 			let amt_msat = invoice.amount_milli_satoshis().unwrap();
-			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-		}
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			print!("> ");
+		},
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-		}
+		},
 	};
 }
 
@@ -1400,14 +1347,15 @@ fn keysend<E: EntropySource>(
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
 		Ok(_payment_hash) => {
-			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-		}
+			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			print!("> ");
+		},
 		Err(e) => {
 			println!("ERROR: failed to send payment: {:?}", e);
 			print!("> ");
 			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-		}
+		},
 	};
 }
 
@@ -1458,11 +1406,11 @@ fn get_invoice(
 		Ok(inv) => {
 			println!("\rSUCCESS: generated invoice: {}", inv);
 			inv
-		}
+		},
 		Err(e) => {
 			println!("\rERROR: failed to create invoice: {:?}", e);
 			return;
-		}
+		},
 	};
 
 	let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());

@@ -68,7 +68,7 @@ impl TryInto<FeeResponse> for JsonResponse {
 				// to convert virtual-bytes into weight units.
 				Some(feerate_btc_per_kvbyte) => {
 					Some((feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32)
-				}
+				},
 				None => None,
 			},
 		})
@@ -93,7 +93,7 @@ impl TryInto<MempoolMinFeeResponse> for JsonResponse {
 				// to convert virtual-bytes into weight units.
 				Some(feerate_btc_per_kvbyte) => {
 					Some((feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32)
-				}
+				},
 				None => None,
 			},
 		})
