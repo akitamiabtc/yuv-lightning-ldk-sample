@@ -1332,7 +1332,7 @@ fn send_payment(
 	let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
 		Ok(res) => res,
 		Err(e) => {
-			println!("Failed to parse invoice");
+			println!("Failed to parse invoice: {:?}", e);
 			print!("> ");
 			return;
 		}
