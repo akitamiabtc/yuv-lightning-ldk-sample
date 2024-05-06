@@ -483,7 +483,7 @@ pub(crate) fn poll_for_user_input(
 					);
 				},
 				"getoffer" => {
-					let offer_builder = channel_manager.create_offer_builder(String::new());
+					let offer_builder = channel_manager.create_offer_builder();
 					if let Err(e) = offer_builder {
 						println!("ERROR: Failed to initiate offer building: {:?}", e);
 						continue;
@@ -950,19 +950,15 @@ fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManag
 	println!("\r\t num_channels: {}", chans.len());
 	println!("\r\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
 	let local_balance_msat = chans.iter().map(|c| c.balance_msat).sum::<u64>();
-	println!("\r\t local_balance_msat: {}", local_balance_msat);
-	println!("\r\t num_peers: {}", peer_manager.get_peer_node_ids().len());
-	println!("\r}}");
+	println!("\t\t local_balance_msat: {}", local_balance_msat);
+	println!("\t\t num_peers: {}", peer_manager.list_peers().len());
+	println!("\t}},");
 }
 
-fn list_peers(ldk_data_dir: String) {
-	let peer_data_path_str = format!("{}/channel_peer_data", ldk_data_dir);
-	let peer_data_path = Path::new(peer_data_path_str.as_str());
-
-	let peer_node_ids = read_channel_peer_data(peer_data_path).unwrap();
-
-	if peer_node_ids.is_empty() {
-		return;
+fn list_peers(peer_manager: Arc<PeerManager>) {
+	println!("\t{{");
+	for peer_details in peer_manager.list_peers() {
+		println!("\t\t pubkey: {}", peer_details.counterparty_node_id);
 	}
 
 	println!("\r{{");
@@ -1160,8 +1156,8 @@ fn list_payments(
 pub(crate) async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 ) -> Result<(), ()> {
-	for (node_pubkey, _) in peer_manager.get_peer_node_ids() {
-		if node_pubkey == pubkey {
+	for peer_details in peer_manager.list_peers() {
+		if peer_details.counterparty_node_id == pubkey {
 			return Ok(());
 		}
 	}
@@ -1183,8 +1179,8 @@ pub(crate) async fn do_connect_peer(
 				tokio::select! {
 					_ = &mut connection_closed_future => return Err(()),
 					_ = tokio::time::sleep(Duration::from_millis(10)) => {},
-				}
-				if peer_manager.get_peer_node_ids().iter().find(|(id, _)| *id == pubkey).is_some() {
+				};
+				if peer_manager.peer_by_node_id(&pubkey).is_some() {
 					return Ok(());
 				}
 			}
@@ -1207,9 +1203,8 @@ fn do_disconnect_peer(
 	}
 
 	//check the pubkey matches a valid connected peer
-	let peers = peer_manager.get_peer_node_ids();
-	if !peers.iter().any(|(pk, _)| &pubkey == pk) {
-		println!("\rError: Could not find peer {}", pubkey);
+	if peer_manager.peer_by_node_id(&pubkey).is_none() {
+		println!("Error: Could not find peer {}", pubkey);
 		return Err(());
 	}
 
