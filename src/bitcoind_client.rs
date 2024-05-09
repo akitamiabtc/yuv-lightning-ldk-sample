@@ -3,17 +3,13 @@ use crate::convert::{
 	RawTx, SignedTx,
 };
 use crate::disk::FilesystemLogger;
-use crate::hex_utils;
-use base64;
-use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
+use base64::engine::general_purpose::STANDARD as Base64Engine;
+use base64::Engine;
 use bitcoin::blockdata::transaction::Transaction;
-use bitcoin::consensus::{encode, Decodable, Encodable};
+use bitcoin::consensus::encode;
 use bitcoin::hash_types::{BlockHash, Txid};
-use bitcoin::hashes::Hash;
-use bitcoin::util::address::{Address, Payload, WitnessVersion};
-use bitcoin::{OutPoint, Script, TxOut, WPubkeyHash, XOnlyPublicKey};
+use bitcoin::util::address::Address;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::log_error;
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::Logger;
@@ -33,6 +29,7 @@ pub struct BitcoindClient {
 	port: u16,
 	rpc_user: String,
 	rpc_password: String,
+	wallet_name: String,
 	fees: Arc<HashMap<ConfirmationTarget, AtomicU32>>,
 	handle: tokio::runtime::Handle,
 	logger: Arc<FilesystemLogger>,
@@ -57,16 +54,16 @@ impl BlockSource for BitcoindClient {
 }
 
 /// The minimum feerate we are allowed to send, as specify by LDK.
-const MIN_FEERATE: u32 = 253;
+const MIN_FEERATE: u32 = 300;
 
 impl BitcoindClient {
 	pub(crate) async fn new(
-		host: String, port: u16, rpc_user: String, rpc_password: String,
+		host: String, port: u16, rpc_user: String, rpc_password: String, wallet_name: String,
 		handle: tokio::runtime::Handle, logger: Arc<FilesystemLogger>,
 	) -> std::io::Result<Self> {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
 		let rpc_credentials =
-			base64::encode(format!("{}:{}", rpc_user.clone(), rpc_password.clone()));
+			Base64Engine.encode(format!("{}:{}", rpc_user.clone(), rpc_password.clone()));
 		let bitcoind_rpc_client = RpcClient::new(&rpc_credentials, http_endpoint)?;
 		let _dummy = bitcoind_rpc_client
 			.call_method::<BlockchainInfo>("getblockchaininfo", &vec![])
@@ -86,6 +83,7 @@ impl BitcoindClient {
 			port,
 			rpc_user,
 			rpc_password,
+			wallet_name,
 			fees: Arc::new(fees),
 			handle: handle.clone(),
 			logger,
@@ -183,7 +181,16 @@ impl BitcoindClient {
 	pub fn get_new_rpc_client(&self) -> std::io::Result<RpcClient> {
 		let http_endpoint = HttpEndpoint::for_host(self.host.clone()).with_port(self.port);
 		let rpc_credentials =
-			base64::encode(format!("{}:{}", self.rpc_user.clone(), self.rpc_password.clone()));
+			Base64Engine.encode(format!("{}:{}", self.rpc_user.clone(), self.rpc_password.clone()));
+		RpcClient::new(&rpc_credentials, http_endpoint)
+	}
+
+	pub fn wallet_rpc_client(&self) -> std::io::Result<RpcClient> {
+		let http_endpoint = HttpEndpoint::for_host(self.host.clone())
+			.with_path(format!("/wallet/{}", self.wallet_name))
+			.with_port(self.port);
+		let rpc_credentials =
+			Base64Engine.encode(format!("{}:{}", self.rpc_user.clone(), self.rpc_password.clone()));
 		RpcClient::new(&rpc_credentials, http_endpoint)
 	}
 
@@ -212,7 +219,11 @@ impl BitcoindClient {
 			// change address or to a new channel output negotiated with the same node.
 			"replaceable": false,
 		});
-		self.bitcoind_rpc_client
+
+		println!("\r{:?}", raw_tx);
+
+		self.wallet_rpc_client()
+			.unwrap()
 			.call_method("fundrawtransaction", &[raw_tx_json, options])
 			.await
 			.unwrap()
@@ -228,7 +239,8 @@ impl BitcoindClient {
 
 	pub async fn sign_raw_transaction_with_wallet(&self, tx_hex: String) -> SignedTx {
 		let tx_hex_json = serde_json::json!(tx_hex);
-		self.bitcoind_rpc_client
+		self.wallet_rpc_client()
+			.unwrap()
 			.call_method("signrawtransactionwithwallet", &vec![tx_hex_json])
 			.await
 			.unwrap()
@@ -237,7 +249,8 @@ impl BitcoindClient {
 	pub async fn get_new_address(&self) -> Address {
 		let addr_args = vec![serde_json::json!("LDK output address")];
 		let addr = self
-			.bitcoind_rpc_client
+			.wallet_rpc_client()
+			.unwrap()
 			.call_method::<NewAddress>("getnewaddress", &addr_args)
 			.await
 			.unwrap();
@@ -252,7 +265,8 @@ impl BitcoindClient {
 	}
 
 	pub async fn list_unspent(&self) -> ListUnspentResponse {
-		self.bitcoind_rpc_client
+		self.wallet_rpc_client()
+			.unwrap()
 			.call_method::<ListUnspentResponse>("listunspent", &vec![])
 			.await
 			.unwrap()
@@ -288,7 +302,7 @@ impl BroadcasterInterface for BitcoindClient {
 									   "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransaction: {}",
 									   err_str,
 									   tx_serialized);
-							print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
+							print!("\rWarning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
 						}
 					}
 			});
@@ -301,56 +315,8 @@ impl UtxoLookup for BitcoindClient {
 		// P2PGossipSync takes None for a UtxoLookup, so this will never be called.
 		todo!();
 	}
-}
 
-impl WalletSource for BitcoindClient {
-	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
-		let utxos = tokio::task::block_in_place(move || {
-			self.handle.block_on(async move { self.list_unspent().await }).0
-		});
-		Ok(utxos
-			.into_iter()
-			.filter_map(|utxo| {
-				let outpoint = OutPoint { txid: utxo.txid, vout: utxo.vout };
-				match utxo.address.payload {
-					Payload::WitnessProgram { version, ref program } => match version {
-						WitnessVersion::V0 => WPubkeyHash::from_slice(program)
-							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
-							.ok(),
-						// TODO: Add `Utxo::new_v1_p2tr` upstream.
-						WitnessVersion::V1 => XOnlyPublicKey::from_slice(program)
-							.map(|_| Utxo {
-								outpoint,
-								output: TxOut {
-									value: utxo.amount,
-									script_pubkey: Script::new_witness_program(version, program),
-								},
-								satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
-									1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
-							})
-							.ok(),
-						_ => None,
-					},
-					_ => None,
-				}
-			})
-			.collect())
-	}
-
-	fn get_change_script(&self) -> Result<Script, ()> {
-		tokio::task::block_in_place(move || {
-			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
-		})
-	}
-
-	fn sign_tx(&self, tx: Transaction) -> Result<Transaction, ()> {
-		let mut tx_bytes = Vec::new();
-		let _ = tx.consensus_encode(&mut tx_bytes).map_err(|_| ());
-		let tx_hex = hex_utils::hex_str(&tx_bytes);
-		let signed_tx = tokio::task::block_in_place(move || {
-			self.handle.block_on(async move { self.sign_raw_transaction_with_wallet(tx_hex).await })
-		});
-		let signed_tx_bytes = hex_utils::to_vec(&signed_tx.hex).ok_or(())?;
-		Transaction::consensus_decode(&mut signed_tx_bytes.as_slice()).map_err(|_| ())
+	fn get_utxo_with_yuv(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
+		todo!()
 	}
 }

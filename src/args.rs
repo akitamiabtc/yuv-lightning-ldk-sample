@@ -1,5 +1,6 @@
 use crate::cli::LdkUserInfo;
 use bitcoin::network::constants::Network;
+use bitcoin::PrivateKey;
 use lightning::ln::msgs::SocketAddress;
 use std::collections::HashMap;
 use std::env;
@@ -7,27 +8,30 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+// TODO: Rewrite with config crate
 pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
-	if env::args().len() < 3 {
-		println!("ldk-tutorial-node requires at least 2 arguments: `cargo run [<bitcoind-rpc-username>:<bitcoind-rpc-password>@]<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*]`");
+	if env::args().len() < 4 {
+		println!("\rldk-tutorial-node requires at least 3 arguments: `cargo run [<bitcoind-rpc-username>:<bitcoind-rpc-password>@]<bitcoind-rpc-host>:<bitcoind-rpc-port> <ldk_storage_directory_path> <private-key> [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*] [enable_yuv_payment]`");
 		return Err(());
 	}
-	let bitcoind_rpc_info = env::args().skip(1).next().unwrap();
-	let bitcoind_rpc_info_parts: Vec<&str> = bitcoind_rpc_info.rsplitn(2, "@").collect();
+	let bitcoind_rpc_info = env::args().nth(1).unwrap();
+	let bitcoind_rpc_info_parts: Vec<&str> = bitcoind_rpc_info.rsplitn(2, '@').collect();
 
 	// Parse rpc auth after getting network for default .cookie location
-	let bitcoind_rpc_path: Vec<&str> = bitcoind_rpc_info_parts[0].split(":").collect();
+	let bitcoind_rpc_path: Vec<&str> = bitcoind_rpc_info_parts[0].split(':').collect();
 	if bitcoind_rpc_path.len() != 2 {
-		println!("ERROR: bad bitcoind RPC path provided");
+		println!("\rERROR: bad bitcoind RPC path provided");
 		return Err(());
 	}
 	let bitcoind_rpc_host = bitcoind_rpc_path[0].to_string();
 	let bitcoind_rpc_port = bitcoind_rpc_path[1].parse::<u16>().unwrap();
 
-	let ldk_storage_dir_path = env::args().skip(2).next().unwrap();
+	let ldk_storage_dir_path = env::args().nth(2).unwrap();
+
+	let private_key = PrivateKey::from_str(env::args().nth(3).unwrap().as_str()).unwrap();
 
 	let mut ldk_peer_port_set = true;
-	let ldk_peer_listening_port: u16 = match env::args().skip(3).next().map(|p| p.parse()) {
+	let ldk_peer_listening_port: u16 = match env::args().nth(4).map(|p| p.parse()) {
 		Some(Ok(p)) => p,
 		Some(Err(_)) => {
 			ldk_peer_port_set = false;
@@ -39,11 +43,11 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		}
 	};
 
-	let mut arg_idx = match ldk_peer_port_set {
-		true => 4,
-		false => 3,
+	let mut arg_idx: usize = match ldk_peer_port_set {
+		true => 5,
+		false => 4,
 	};
-	let network: Network = match env::args().skip(arg_idx).next().as_ref().map(String::as_str) {
+	let network: Network = match env::args().nth(arg_idx).as_deref() {
 		Some("testnet") => Network::Testnet,
 		Some("regtest") => Network::Regtest,
 		Some("signet") => Network::Signet,
@@ -58,18 +62,18 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 			.or(get_rpc_auth_from_env_file(None))
 			.or(get_rpc_auth_from_cookie(None, Some(network), None))
 			.or({
-				println!("ERROR: unable to get bitcoind RPC username and password");
+				println!("\rERROR: unable to get bitcoind RPC username and password");
 				print_rpc_auth_help();
 				Err(())
 			})?
 	} else if bitcoind_rpc_info_parts.len() == 2 {
 		parse_rpc_auth(bitcoind_rpc_info_parts[1])?
 	} else {
-		println!("ERROR: bad bitcoind RPC URL provided");
+		println!("\rERROR: bad bitcoind RPC URL provided");
 		return Err(());
 	};
 
-	let ldk_announced_node_name = match env::args().skip(arg_idx + 1).next().as_ref() {
+	let ldk_announced_node_name = match env::args().nth(arg_idx + 1).as_ref() {
 		Some(s) => {
 			if s.len() > 32 {
 				panic!("Node Alias can not be longer than 32 bytes");
@@ -82,22 +86,25 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		None => [0; 32],
 	};
 
+	let yuv_rpc_url: Option<String> = env::args().nth(arg_idx + 1);
+	if yuv_rpc_url.is_some() {
+		arg_idx += 1;
+	}
+
 	let mut ldk_announced_listen_addr = Vec::new();
-	loop {
-		match env::args().skip(arg_idx + 1).next().as_ref() {
-			Some(s) => match SocketAddress::from_str(s) {
-				Ok(sa) => {
-					ldk_announced_listen_addr.push(sa);
-					arg_idx += 1;
-				}
-				Err(_) => panic!("Failed to parse announced-listen-addr into a socket address"),
-			},
-			None => break,
+	while let Some(s) = env::args().nth(arg_idx + 1).as_ref() {
+		match SocketAddress::from_str(s) {
+			Ok(sa) => {
+				ldk_announced_listen_addr.push(sa);
+				arg_idx += 1;
+			}
+			Err(_) => break,
 		}
 	}
 
 	Ok(LdkUserInfo {
 		bitcoind_rpc_username,
+		private_key,
 		bitcoind_rpc_password,
 		bitcoind_rpc_host,
 		bitcoind_rpc_port,
@@ -106,6 +113,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		ldk_announced_listen_addr,
 		ldk_announced_node_name,
 		network,
+		yuv_rpc_url,
 	})
 }
 
@@ -123,26 +131,22 @@ const BITCOIND_RPC_PASSWORD_KEY: &str = "RPC_PASSWORD";
 
 fn print_rpc_auth_help() {
 	// Get the default data directory
-	let home_dir = env::home_dir()
-		.as_ref()
-		.map(|ref p| p.to_str())
-		.flatten()
-		.unwrap_or("$HOME")
-		.replace("\\", "/");
+	let home_dir =
+		home::home_dir().as_ref().and_then(|p| p.to_str()).unwrap_or("$HOME").replace('\\', "/");
 	let data_dir = format!("{}/{}", home_dir, DEFAULT_BITCOIN_DATADIR);
-	println!("To provide the bitcoind RPC username and password, you can either:");
+	println!("\rTo provide the bitcoind RPC username and password, you can either:");
 	println!(
-		"1. Provide the username and password as the first argument to this program in the format: \
+		"\n1. Provide the username and password as the first argument to this program in the format: \
 		<bitcoind-rpc-username>:<bitcoind-rpc-password>@<bitcoind-rpc-host>:<bitcoind-rpc-port>"
 	);
-	println!("2. Provide <bitcoind-rpc-username>:<bitcoind-rpc-password> in a .cookie file in the default \
+	println!("\r2. Provide <bitcoind-rpc-username>:<bitcoind-rpc-password> in a .cookie file in the default \
 		bitcoind data directory (automatically created by bitcoind on startup): `{}`", data_dir);
 	println!(
-		"3. Set the {} and {} environment variables",
+		"\r3. Set the {} and {} environment variables",
 		BITCOIND_RPC_USER_KEY, BITCOIND_RPC_PASSWORD_KEY
 	);
 	println!(
-		"4. Provide {} and {} fields in a .env file in the current directory",
+		"\r4. Provide {} and {} fields in a .env file in the current directory",
 		BITCOIND_RPC_USER_KEY, BITCOIND_RPC_PASSWORD_KEY
 	);
 }
@@ -150,7 +154,7 @@ fn print_rpc_auth_help() {
 fn parse_rpc_auth(rpc_auth: &str) -> Result<(String, String), ()> {
 	let rpc_auth_info: Vec<&str> = rpc_auth.split(':').collect();
 	if rpc_auth_info.len() != 2 {
-		println!("ERROR: bad bitcoind RPC username/password combo provided");
+		println!("\rERROR: bad bitcoind RPC username/password combo provided");
 		return Err(());
 	}
 	let rpc_username = rpc_auth_info[0].to_string();
@@ -162,9 +166,9 @@ fn get_cookie_path(
 	data_dir: Option<(&str, bool)>, network: Option<Network>, cookie_file_name: Option<&str>,
 ) -> Result<PathBuf, ()> {
 	let data_dir_path = match data_dir {
-		Some((dir, true)) => env::home_dir().ok_or(())?.join(dir),
+		Some((dir, true)) => home::home_dir().ok_or(())?.join(dir),
 		Some((dir, false)) => PathBuf::from(dir),
-		None => env::home_dir().ok_or(())?.join(DEFAULT_BITCOIN_DATADIR),
+		None => home::home_dir().ok_or(())?.join(DEFAULT_BITCOIN_DATADIR),
 	};
 
 	let data_dir_path_with_net = match network {
@@ -210,10 +214,7 @@ fn get_rpc_auth_from_env_file(env_file_name: Option<&str>) -> Result<(String, St
 
 fn parse_env_file(env_file_name: Option<&str>) -> Result<HashMap<String, String>, ()> {
 	// Default .env file name is .env
-	let env_file_name = match env_file_name {
-		Some(filename) => filename,
-		None => ".env",
-	};
+	let env_file_name = env_file_name.unwrap_or(".env");
 
 	// Read .env file
 	let env_file_path = Path::new(env_file_name);
@@ -224,7 +225,7 @@ fn parse_env_file(env_file_name: Option<&str>) -> Result<HashMap<String, String>
 	for line in env_file_contents.lines() {
 		let line_parts: Vec<&str> = line.splitn(2, '=').collect();
 		if line_parts.len() != 2 {
-			println!("ERROR: bad .env file format");
+			println!("\rERROR: bad .env file format");
 			return Err(());
 		}
 		env_file_map.insert(line_parts[0].to_string(), line_parts[1].to_string());
@@ -266,13 +267,13 @@ mod rpc_auth_tests {
 				None,
 				None,
 				None,
-				env::home_dir().unwrap().join(DEFAULT_BITCOIN_DATADIR).join(".cookie"),
+				home::home_dir().unwrap().join(DEFAULT_BITCOIN_DATADIR).join(".cookie"),
 			),
 			(
 				Some((TEST_DATA_DIR, true)),
 				Some(Network::Testnet),
 				None,
-				env::home_dir().unwrap().join(TEST_DATA_DIR).join("testnet3").join(".cookie"),
+				home::home_dir().unwrap().join(TEST_DATA_DIR).join("testnet3").join(".cookie"),
 			),
 			(
 				Some((TEST_DATA_DIR, false)),

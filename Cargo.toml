@@ -1,32 +1,67 @@
 [package]
-name = "ldk-sample"
+name = "yuv-ln-node"
 version = "0.1.0"
 authors = ["Valentine Wallace <vwallace@protonmail.com>"]
 license = "MIT OR Apache-2.0"
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2021"
 
 [dependencies]
-lightning = { version = "0.0.117", features = ["max_level_trace"] }
-lightning-block-sync = { version = "0.0.117", features = [ "rpc-client", "tokio" ] }
-lightning-invoice = { version = "0.25.0" }
-lightning-net-tokio = { version = "0.0.117" }
-lightning-persister = { version = "0.0.117" }
-lightning-background-processor = { version = "0.0.117", features = [ "futures" ] }
-lightning-rapid-gossip-sync = { version = "0.0.117" }
+base64 = { version = "0.21.4" }
+bitcoin = { version = "0.29.2", features = ["std"] }
+bitcoin-bech32 = { version = "0.12" }
+bech32 = { version = "0.9.1" }
+hex = { version = "0.4.3" }
+libc = { version = "0.2" }
 
-base64 = "0.13.0"
-bitcoin = "0.29.0"
-bitcoin-bech32 = "0.12"
-bech32 = "0.8"
-hex = "0.3"
-libc = "0.2"
+crossterm = "0.27.0"
 
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-rand = "0.4"
+rand = { version = "0.8", default-features = false, features = ["std"] }
 serde_json = { version = "1.0" }
-tokio = { version = "1", features = [ "io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time" ] }
+tokio = { version = "1.33.0", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time"] }
+home = { version = "0.5.5" }
+thiserror = { version = "1.0", default-features = false }
+eyre = { version = "0.6.8" }
+jsonrpsee = { version = "0.20.3" }
+
+bdk = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha", features = ["rpc", "std"], default-features = false }
+ydk = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha" }
+yuv-storage = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha" }
+yuv-types = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha" }
+yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha" }
+yuv-rpc-api = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha", features = ["client"] }
+bitcoin-client = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.1.0-alpha" }
+
+[dependencies.lightning]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
+features = ["max_level_trace"]
+
+[dependencies.lightning-block-sync]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
+features = ["rpc-client", "tokio"]
+
+[dependencies.lightning-invoice]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
+
+[dependencies.lightning-net-tokio]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
+
+[dependencies.lightning-persister]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
+
+[dependencies.lightning-background-processor]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
+features = ["futures"]
+
+[dependencies.lightning-rapid-gossip-sync]
+git = "https://github.com/akitamiabtc/yuv-lightning.git"
+tag = "v0.1.0+lightning-0.0.117"
 
 [profile.release]
 panic = "abort"

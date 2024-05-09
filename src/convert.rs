@@ -19,6 +19,7 @@ impl TryInto<FundedTx> for JsonResponse {
 	}
 }
 
+#[derive(Debug)]
 pub struct RawTx(pub String);
 
 impl TryInto<RawTx> for JsonResponse {
@@ -118,6 +119,7 @@ impl TryInto<BlockchainInfo> for JsonResponse {
 	}
 }
 
+#[derive(Debug)]
 pub struct ListUnspentUtxo {
 	pub txid: Txid,
 	pub vout: u32,
@@ -125,6 +127,7 @@ pub struct ListUnspentUtxo {
 	pub address: Address,
 }
 
+#[derive(Debug)]
 pub struct ListUnspentResponse(pub Vec<ListUnspentUtxo>);
 
 impl TryInto<ListUnspentResponse> for JsonResponse {

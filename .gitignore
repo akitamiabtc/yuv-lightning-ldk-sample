@@ -12,3 +12,8 @@ Cargo.lock
 
 # RPC auth
 .env
+
+# Any dev filees
+*.dev.*
+*.dev
+dev.*
