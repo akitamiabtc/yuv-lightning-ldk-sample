@@ -193,22 +193,25 @@ pub(crate) fn read_input(
 pub(crate) fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
-	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, ldk_data_dir: String,
-	network: Network, logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
+	onion_messenger: Arc<OnionMessenger>, inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, ldk_data_dir: String, network: Network,
+	logger: Arc<disk::FilesystemLogger>, fs_store: Arc<FilesystemStore>,
+	default_config: Arc<Mutex<UserConfig>>,
 ) {
 	println!(
 		"\rLDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
 	);
-	println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
-	println!("Local Node ID is {}.", channel_manager.get_our_node_id());
-	'read_command: loop {
-		print!("> ");
-		io::stdout().flush().unwrap(); // Without flushing, the `>` doesn't print
-		let mut line = String::new();
-		if let Err(e) = io::stdin().read_line(&mut line) {
-			break println!("ERROR: {}", e);
-		}
+	println!("\rLDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
+	println!("\rLocal Node ID is {}.", channel_manager.get_our_node_id());
+
+	let mut commands_history = Vec::new();
+
+	'outer: loop {
+		stdout().flush().unwrap();
+		let line = match read_input("> ", &mut commands_history).unwrap() {
+			Some(line) => line,
+			None => break,
+		};
 
 		if line.len() == 0 {
 			continue;
@@ -266,15 +269,14 @@ pub(crate) fn poll_for_user_input(
 						println!("\rERROR: openchannel has 2 required arguments: `openchannel peer_pubkey channel_amt_satoshis [--pixel <luma>:<chroma>] [--public] [--with-anchors] [--min-inbound-htlc]`");
 						continue;
 					}
-					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
-					let (pubkey, peer_addr) =
-						match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
-							Ok(info) => info,
-							Err(e) => {
-								println!("{:?}", e.into_inner().unwrap());
-								continue;
-							},
-						};
+
+					let pubkey = match hex_utils::to_compressed_pubkey(peer_pubkey.unwrap()) {
+						Some(pubkey) => pubkey,
+						None => {
+							println!("\rError: invalid peer pubkey");
+							continue;
+						}
+					};
 
 					let chan_amt_sat: Result<u64, _> = channel_value_sat.unwrap().parse();
 					if chan_amt_sat.is_err() {
@@ -305,9 +307,9 @@ pub(crate) fn poll_for_user_input(
 							"--with-anchors" | "--with-anchors=true" => with_anchors = true,
 							"--with-anchors=false" => with_anchors = false,
 							_ => {
-								println!("ERROR: invalid boolean flag format. Valid formats: `--option`, `--option=true` `--option=false`");
-								continue;
-							},
+								println!("\rERROR: unknown parameter: {word}");
+								continue 'outer;
+							}
 						}
 					}
 
@@ -341,16 +343,9 @@ pub(crate) fn poll_for_user_input(
 						chan_amt_sat.unwrap(),
 						config,
 						channel_manager.clone(),
-					)
-					.is_ok()
-					{
-						let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
-						let _ = disk::persist_channel_peer(
-							Path::new(&peer_data_path),
-							peer_pubkey_and_ip_addr,
-						);
-					}
-				},
+						yuv_pixel,
+					);
+				}
 				"sendpayment" => {
 					let invoice_str = words.next();
 					if invoice_str.is_none() {
@@ -360,31 +355,10 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 
-					let mut user_provided_amt: Option<u64> = None;
-					if let Some(amt_msat_str) = words.next() {
-						match amt_msat_str.parse() {
-							Ok(amt) => user_provided_amt = Some(amt),
-							Err(e) => {
-								println!("ERROR: couldn't parse amount_msat: {}", e);
-								continue;
-							},
-						};
-					}
-
-					if let Ok(offer) = Offer::from_str(invoice_str.unwrap()) {
-						let random_bytes = keys_manager.get_secure_random_bytes();
-						let payment_id = PaymentId(random_bytes);
-
-						let amt_msat = match (offer.amount(), user_provided_amt) {
-							(Some(offer::Amount::Bitcoin { amount_msats }), _) => *amount_msats,
-							(_, Some(amt)) => amt,
-							(amt, _) => {
-								println!("ERROR: Cannot process non-Bitcoin-denominated offer value {:?}", amt);
-								continue;
-							},
-						};
-						if user_provided_amt.is_some() && user_provided_amt != Some(amt_msat) {
-							println!("Amount didn't match offer of {}msat", amt_msat);
+					let invoice = match Bolt11Invoice::from_str(invoice_str.unwrap()) {
+						Ok(inv) => inv,
+						Err(e) => {
+							println!("\rERROR: invalid invoice: {:?}", e);
 							continue;
 						}
 
@@ -598,7 +572,13 @@ pub(crate) fn poll_for_user_input(
 					{
 						println!("\rSUCCESS: connected to peer {}", pubkey);
 					}
-				},
+
+					let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+					let _ = disk::persist_channel_peer(
+						Path::new(&peer_data_path),
+						peer_pubkey_and_ip_addr.unwrap(),
+					);
+				}
 				"disconnectpeer" => {
 					let peer_pubkey = words.next();
 					if peer_pubkey.is_none() {
@@ -770,12 +750,66 @@ pub(crate) fn poll_for_user_input(
 						destination,
 						None,
 					) {
-						Ok(success) => {
-							println!("SUCCESS: forwarded onion message to first hop {:?}", success)
-						},
-						Err(e) => println!("ERROR: failed to send onion message: {:?}", e),
+						Ok(()) => println!("\rSUCCESS: forwarded onion message to first hop"),
+						Err(e) => println!("\rERROR: failed to send onion message: {:?}", e),
 					}
-				},
+				}
+				"updatebalance" => {
+					let channel_id_str = words.next();
+					if channel_id_str.is_none() {
+						println!("\rERROR: updatebalance requires a channel ID: `updatebalance <channel_id> <peer_pubkey>`");
+						continue;
+					}
+					let channel_id_vec = hex_utils::to_vec(channel_id_str.unwrap());
+					if channel_id_vec.is_none() || channel_id_vec.as_ref().unwrap().len() != 32 {
+						println!("\rERROR: couldn't parse channel_id");
+						continue;
+					}
+					let mut channel_id = [0; 32];
+					channel_id.copy_from_slice(&channel_id_vec.unwrap());
+
+					let peer_pubkey = match pubkey_from_input(&mut words) {
+						Some(value) => value,
+						None => continue,
+					};
+
+					let mut new_balance_msat = None;
+					if let Some(msat_raw) = words.next() {
+						let msat = match u64::from_str(msat_raw) {
+							Ok(msat) => msat,
+							Err(e) => {
+								println!("\rERROR: invalid new_balance_msat (u64): {}", e);
+								continue;
+							}
+						};
+
+						new_balance_msat = Some(msat);
+					}
+
+					let mut new_yuv_luma = None;
+					if let Some(luma_raw) = words.next() {
+						let luma = match u128::from_str(luma_raw) {
+							Ok(luma) => Luma::from(luma),
+							Err(e) => {
+								println!("\rERROR: invalid luma(u64): {}", e);
+								continue;
+							}
+						};
+
+						new_yuv_luma = Some(luma);
+					}
+
+					update_balance(
+						channel_id,
+						peer_pubkey,
+						new_balance_msat,
+						new_yuv_luma,
+						channel_manager.clone(),
+					);
+				}
+				"listnodes" => {
+					println!("\r{}", &network_graph)
+				}
 				"quit" | "exit" => break,
 				_ => println!("\rUnknown command. See \"help\" for available commands."),
 			}
@@ -907,31 +941,37 @@ fn pubkey_from_input(words: &mut SplitWhitespace<'_>) -> Option<PublicKey> {
 fn help() {
 	let package_version = env!("CARGO_PKG_VERSION");
 	let package_name = env!("CARGO_PKG_NAME");
-	println!("\nVERSION:");
-	println!("  {} v{}", package_name, package_version);
-	println!("\nUSAGE:");
-	println!("  Command [arguments]");
-	println!("\nCOMMANDS:");
-	println!("  help\tShows a list of commands.");
-	println!("  quit\tClose the application.");
-	println!("\n  Channels:");
-	println!("      openchannel pubkey@host:port <amt_satoshis> [--public] [--with-anchors]");
-	println!("      closechannel <channel_id> <peer_pubkey>");
-	println!("      forceclosechannel <channel_id> <peer_pubkey>");
-	println!("      listchannels");
-	println!("\n  Peers:");
-	println!("      connectpeer pubkey@host:port");
-	println!("      disconnectpeer <peer_pubkey>");
-	println!("      listpeers");
-	println!("\n  Payments:");
-	println!("      sendpayment <invoice|offer> [<amount_msat>]");
-	println!("      keysend <dest_pubkey> <amt_msats>");
-	println!("      listpayments");
-	println!("\n  Invoices:");
-	println!("      getinvoice <amt_msats> <expiry_secs>");
-	println!("      getoffer [<amt_msats>]");
-	println!("\n  Other:");
-	println!("      signmessage <message>");
+	println!("\r\n\tVERSION:");
+	println!("\r\t  {} v{}", package_name, package_version);
+	println!("\r\n\tUSAGE:");
+	println!("\r\t  Command [arguments]");
+	println!("\r\n\tCOMMANDS:");
+	println!("\r\t  help\tShows a list of commands.");
+	println!("\r\t  quit\tClose the application.");
+	println!("\r\n\t  Channels:");
+	println!("\r\t      openchannel peer_pubkey channel_amt_satoshis [--pixel <luma>:<chroma>][--public][--with-anchors]");
+	println!("\r\t      closechannel <channel_id> <peer_pubkey>");
+	println!("\r\t      forceclosechannel <channel_id> <peer_pubkey>");
+	println!("\r\t      listchannels");
+	println!("\r\t      configchannel");
+	println!("\r\t          [--min-inb-htlc <min_inbound_htlc_msat>]");
+	println!("\r\t          [--max-inb-htlc-pct <max_inbound_htlc_msat_percent>]");
+	println!("\r\t          [--support-yuv <true|false>]");
+	println!("\r\n\t  Peers:");
+	println!("\r\t      connectpeer pubkey@host:port");
+	println!("\r\t      disconnectpeer <peer_pubkey>");
+	println!("\r\t      listpeers");
+	println!("\r\n\t  Payments:");
+	// println!("\r      sendhtlc <final_cltv_expiry> <amount_msats> [--yuv_amount=] <destination>");
+	// println!(
+	// 	"\r      sendalongpath <final_cltv_expiry> <amount_msats> [--yuv_amount=] <node_id...>"
+	// );
+	println!("\r\t      keysend <dest_pubkey> <amt_msats>");
+	println!("\r\t      listpayments");
+	println!("\r\n\t  Invoices:");
+	println!("\r\t      getinvoice <amt_msats> <expiry_secs> [--pixel <luma>:<chroma>]");
+	println!("\r\t      sendpayment <invoice>");
+	println!("\r\n\t  UpdateBalance:");
 	println!(
 		"\r\t      updatebalance <channel_id> <peer_pubkey> [new_balance_msat] [new_yuv_luma]"
 	);
@@ -950,15 +990,19 @@ fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManag
 	println!("\r\t num_channels: {}", chans.len());
 	println!("\r\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
 	let local_balance_msat = chans.iter().map(|c| c.balance_msat).sum::<u64>();
-	println!("\t\t local_balance_msat: {}", local_balance_msat);
-	println!("\t\t num_peers: {}", peer_manager.list_peers().len());
-	println!("\t}},");
+	println!("\r\t local_balance_msat: {}", local_balance_msat);
+	println!("\r\t num_peers: {}", peer_manager.get_peer_node_ids().len());
+	println!("\r}}");
 }
 
-fn list_peers(peer_manager: Arc<PeerManager>) {
-	println!("\t{{");
-	for peer_details in peer_manager.list_peers() {
-		println!("\t\t pubkey: {}", peer_details.counterparty_node_id);
+fn list_peers(ldk_data_dir: String) {
+	let peer_data_path_str = format!("{}/channel_peer_data", ldk_data_dir);
+	let peer_data_path = Path::new(peer_data_path_str.as_str());
+
+	let peer_node_ids = read_channel_peer_data(peer_data_path).unwrap();
+
+	if peer_node_ids.is_empty() {
+		return;
 	}
 
 	println!("\r{{");
@@ -1092,24 +1136,8 @@ fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<Netw
 	println!("\r\n]");
 }
 
-fn list_payments(
-	inbound_payments: &InboundPaymentInfoStorage, outbound_payments: &OutboundPaymentInfoStorage,
-) {
-	print!("[");
-	for (payment_hash, payment_info) in &inbound_payments.payments {
-		println!("");
-		println!("\t{{");
-		println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
-		println!("\t\tpayment_hash: {},", payment_hash);
-		println!("\t\thtlc_direction: inbound,");
-		println!(
-			"\t\thtlc_status: {},",
-			match payment_info.status {
-				HTLCStatus::Pending => "pending",
-				HTLCStatus::Succeeded => "succeeded",
-				HTLCStatus::Failed => "failed",
-			}
-		);
+fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &PaymentInfoStorage) {
+	print!("\r[");
 
 	let inbound_payments = &inbound_payments.payments;
 	if !inbound_payments.is_empty() {
@@ -1179,8 +1207,8 @@ pub(crate) async fn do_connect_peer(
 				tokio::select! {
 					_ = &mut connection_closed_future => return Err(()),
 					_ = tokio::time::sleep(Duration::from_millis(10)) => {},
-				};
-				if peer_manager.peer_by_node_id(&pubkey).is_some() {
+				}
+				if peer_manager.get_peer_node_ids().iter().find(|(id, _)| *id == pubkey).is_some() {
 					return Ok(());
 				}
 			}
@@ -1203,8 +1231,9 @@ fn do_disconnect_peer(
 	}
 
 	//check the pubkey matches a valid connected peer
-	if peer_manager.peer_by_node_id(&pubkey).is_none() {
-		println!("Error: Could not find peer {}", pubkey);
+	let peers = peer_manager.get_peer_node_ids();
+	if !peers.iter().any(|(pk, _)| &pubkey == pk) {
+		println!("\rError: Could not find peer {}", pubkey);
 		return Err(());
 	}
 
@@ -1216,29 +1245,22 @@ fn open_channel(
 	peer_pubkey: PublicKey, channel_amt_sat: u64, config: UserConfig,
 	channel_manager: Arc<ChannelManager>, yuv_pixel: Option<Pixel>,
 ) -> Result<(), ()> {
-	let config = UserConfig {
-		channel_handshake_limits: ChannelHandshakeLimits {
-			// lnd's max to_self_delay is 2016, so we want to be compatible.
-			their_to_self_delay: 2016,
-			..Default::default()
-		},
-		channel_handshake_config: ChannelHandshakeConfig {
-			announced_channel,
-			negotiate_anchors_zero_fee_htlc_tx: with_anchors,
-			..Default::default()
-		},
-		..Default::default()
-	};
-
-	match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, None, Some(config)) {
+	match channel_manager.create_channel(
+		peer_pubkey,
+		channel_amt_sat,
+		0,
+		0,
+		yuv_pixel,
+		Some(config),
+	) {
 		Ok(_) => {
-			println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
-			return Ok(());
-		},
+			println!("\rEVENT: initiated channel with peer {}. ", peer_pubkey);
+			Ok(())
+		}
 		Err(e) => {
-			println!("ERROR: failed to open channel: {:?}", e);
-			return Err(());
-		},
+			println!("\rERROR: failed to open channel: {:?}", e);
+			Err(())
+		}
 	}
 }
 
@@ -1300,13 +1322,11 @@ fn send_payment(
 		Ok(_) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
 			let amt_msat = invoice.amount_milli_satoshis().unwrap();
-			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-			print!("> ");
-		},
+			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+		}
 		Err(e) => {
-			println!("ERROR: failed to send payment: {:?}", e);
-			print!("> ");
-			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
+			println!("\rERROR: failed to send payment: {:?}", e);
+			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		},
 	};
@@ -1342,22 +1362,20 @@ fn keysend<E: EntropySource>(
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
 		Ok(_payment_hash) => {
-			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
-			print!("> ");
-		},
+			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+		}
 		Err(e) => {
-			println!("ERROR: failed to send payment: {:?}", e);
-			print!("> ");
-			outbound_payments.payments.get_mut(&payment_id).unwrap().status = HTLCStatus::Failed;
+			println!("\rERROR: failed to send payment: {:?}", e);
+			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
 		},
 	};
 }
 
 fn get_invoice(
-	amt_msat: u64, inbound_payments: &mut InboundPaymentInfoStorage,
-	channel_manager: &ChannelManager, keys_manager: Arc<KeysManager>, network: Network,
-	expiry_secs: u32, logger: Arc<disk::FilesystemLogger>,
+	amt_msat: u64, inbound_payments: &mut PaymentInfoStorage, channel_manager: &ChannelManager,
+	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32, yuv_pixel: Option<Pixel>,
+	logger: Arc<disk::FilesystemLogger>,
 ) {
 	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,

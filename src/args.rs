@@ -92,16 +92,13 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 	}
 
 	let mut ldk_announced_listen_addr = Vec::new();
-	loop {
-		match env::args().skip(arg_idx + 1).next().as_ref() {
-			Some(s) => match SocketAddress::from_str(s) {
-				Ok(sa) => {
-					ldk_announced_listen_addr.push(sa);
-					arg_idx += 1;
-				},
-				Err(_) => panic!("Failed to parse announced-listen-addr into a socket address"),
-			},
-			None => break,
+	while let Some(s) = env::args().nth(arg_idx + 1).as_ref() {
+		match SocketAddress::from_str(s) {
+			Ok(sa) => {
+				ldk_announced_listen_addr.push(sa);
+				arg_idx += 1;
+			}
+			Err(_) => break,
 		}
 	}
 

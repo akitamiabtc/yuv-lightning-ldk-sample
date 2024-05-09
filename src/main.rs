@@ -18,9 +18,9 @@ use bdk::wallet::wallet_name_from_descriptor;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{BlockHash, Network};
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
-use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
-use lightning::chain::{BestBlock, Filter, Watch};
-use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
+use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, YuvConfirm};
+use lightning::chain::{Filter, Watch};
+use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet as LdkWallet};
 use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::chan_utils::NewUpdateBalanceRequest;
 use lightning::ln::channelmanager::RecentPaymentDetails;
@@ -37,10 +37,8 @@ use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
 use lightning::sign::{EntropySource, InMemorySigner, KeysManager};
 use lightning::util::config::UserConfig;
-use lightning::util::persist::{
-	self, KVStore, MonitorUpdatingPersister, OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
-};
+use lightning::util::logger::Logger;
+use lightning::util::persist::{self, KVStore, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning::util::sweep as ldk_sweep;
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
@@ -163,6 +161,12 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 	lightning_block_sync::gossip::TokioSpawner,
 	Arc<lightning_block_sync::rpc::RpcClient>,
 	Arc<FilesystemLogger>,
+	SocketDescriptor,
+	Arc<ChannelManager>,
+	Arc<SimpleArcOnionMessenger<FilesystemLogger>>,
+	IgnoringMessageHandler,
+	Arc<KeysManager>,
+	Arc<YuvClient>,
 >;
 
 pub(crate) type PeerManager = SimpleArcPeerManager<
@@ -209,12 +213,11 @@ pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
 struct OutputSweeperWrapper(Arc<OutputSweeper>);
 
 async fn handle_ldk_events(
-	channel_manager: Arc<ChannelManager>, bitcoind_client: &BitcoindClient,
-	network_graph: &NetworkGraph, keys_manager: &KeysManager,
-	bump_tx_event_handler: &BumpTxEventHandler, peer_manager: Arc<PeerManager>,
-	inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
-	outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>, fs_store: Arc<FilesystemStore>,
-	output_sweeper: OutputSweeperWrapper, network: Network, event: Event,
+	channel_manager: &Arc<ChannelManager>, network_graph: &NetworkGraph,
+	keys_manager: &KeysManager, bump_tx_event_handler: &Arc<BumpTxEventHandler>,
+	inbound_payments: Arc<Mutex<PaymentInfoStorage>>,
+	outbound_payments: Arc<Mutex<PaymentInfoStorage>>, fs_store: &Arc<FilesystemStore>,
+	event: Event, wallet: Arc<TokioMutex<Wallet>>, default_config: Arc<Mutex<UserConfig>>,
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -227,22 +230,7 @@ async fn handle_ldk_events(
 			funding_counterparty_pubkey,
 			..
 		} => {
-			// Construct the raw transaction with one output, that is paid the amount of the
-			// channel.
-			let addr = WitnessProgram::from_scriptpubkey(
-				&output_script.as_bytes(),
-				match network {
-					Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
-					Network::Regtest => bitcoin_bech32::constants::Network::Regtest,
-					Network::Signet => bitcoin_bech32::constants::Network::Signet,
-					Network::Testnet | _ => bitcoin_bech32::constants::Network::Testnet,
-				},
-			)
-			.expect("Lightning funding tx should always be to a SegWit output")
-			.to_address();
-			let mut outputs = vec![HashMap::with_capacity(1)];
-			outputs[0].insert(addr, channel_value_satoshis as f64 / 100_000_000.0);
-			let raw_tx = bitcoind_client.create_raw_transaction(outputs).await;
+			let mut wallet = wallet.lock().await;
 
 			let (final_tx, yuv_proofs) = if let Some(funding_pixel) = funding_yuv_pixel {
 				let yuv_tx = wallet
@@ -262,11 +250,6 @@ async fn handle_ldk_events(
 				(tx, None)
 			};
 
-			// Sign the final funding transaction and give it to LDK, who will eventually broadcast it.
-			let signed_tx = bitcoind_client.sign_raw_transaction_with_wallet(funded_tx.hex).await;
-			assert_eq!(signed_tx.complete, true);
-			let final_tx: Transaction =
-				encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
 			// Give the funding transaction back to LDK for opening the channel.
 			match channel_manager.funding_transaction_generated(
 				&temporary_channel_id,
@@ -385,8 +368,8 @@ async fn handle_ldk_events(
 			payment_preimage, payment_hash, fee_paid_msat, payment_id, ..
 		} => {
 			let mut outbound = outbound_payments.lock().unwrap();
-			for (id, payment) in outbound.payments.iter_mut() {
-				if *id == payment_id.unwrap() {
+			match outbound.payments.get_mut(&payment_hash) {
+				Some(payment) => {
 					payment.preimage = Some(payment_preimage);
 					payment.status = HTLCStatus::Succeeded;
 
@@ -482,9 +465,7 @@ async fn handle_ldk_events(
 			total_fee_earned_msat,
 			claim_from_onchain_tx,
 			outbound_amount_forwarded_msat,
-			skimmed_fee_msat: _,
-			prev_user_channel_id: _,
-			next_user_channel_id: _,
+			outbound_amount_forwarded_yuv,
 		} => {
 			let read_only_network_graph = network_graph.read_only();
 			let nodes = read_only_network_graph.nodes();
@@ -528,7 +509,21 @@ async fn handle_ldk_events(
 			} else {
 				"?".to_string()
 			};
-			if let Some(fee_earned) = total_fee_earned_msat {
+
+			let yuv_log = if let Some(yuv_amount) = outbound_amount_forwarded_yuv {
+				let channel_details =
+					channel_manager.get_channel_details(&prev_channel_id.unwrap()).unwrap();
+
+				format!(
+					" and YUV {} {}",
+					yuv_amount,
+					channel_details.yuv_holder_pixel.unwrap().chroma
+				)
+			} else {
+				"".to_string()
+			};
+
+			if let Some(fee_earned) = fee_earned_msat {
 				println!(
 					"\rEvent: Forwarded payment for {} msat{}{}{}, earning {} msat {}",
 					amt_args, yuv_log, from_prev_str, to_next_str, fee_earned, from_onchain_str
@@ -600,19 +595,32 @@ async fn handle_ldk_events(
 		},
 		Event::HTLCIntercepted { .. } => {},
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
-		Event::ConnectionNeeded { node_id, addresses } => {
-			tokio::spawn(async move {
-				for address in addresses {
-					if let Ok(sockaddrs) = address.to_socket_addrs() {
-						for addr in sockaddrs {
-							let pm = Arc::clone(&peer_manager);
-							if cli::connect_peer_if_necessary(node_id, addr, pm).await.is_ok() {
-								return;
-							}
-						}
-					}
-				}
-			});
+		Event::UpdateBalanceApplied(channel_id) => {
+			println!("\rEvent: Channel {} has applied the updated balances", channel_id);
+			print!("\r> ");
+			io::stdout().flush().unwrap();
+		}
+		Event::NewUpdateBalanceRequest { channel_id, request } => match request {
+			NewUpdateBalanceRequest::NewBalances {
+				updated_counterparty_msat,
+				updated_counterparty_yuv_luma,
+			} => {
+				println!(
+					"\rEvent: Counterparty has requested an update to the balances in channel: {}. \
+					 The new balances are: {} msat, {:?} yuv luma",
+					channel_id, updated_counterparty_msat, updated_counterparty_yuv_luma.map(|luma| luma.amount)
+				);
+				print!("\r> ");
+				io::stdout().flush().unwrap();
+			}
+			NewUpdateBalanceRequest::Revoke => {
+				println!(
+					"\rEvent: Channel {} has requested to revoke the update balances",
+					channel_id
+				);
+				print!("\r> ");
+				io::stdout().flush().unwrap();
+			}
 		},
 	}
 }
@@ -646,7 +654,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_port,
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
-		args.network,
+		wallet_name,
 		tokio::runtime::Handle::current(),
 		Arc::clone(&logger),
 	)
@@ -663,10 +671,10 @@ async fn start_ldk() {
 	let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
 	if bitcoind_chain
 		!= match args.network {
-			bitcoin::Network::Bitcoin => "main",
-			bitcoin::Network::Regtest => "regtest",
-			bitcoin::Network::Signet => "signet",
-			bitcoin::Network::Testnet | _ => "test",
+			Network::Bitcoin => "main",
+			Network::Testnet => "test",
+			Network::Regtest => "regtest",
+			Network::Signet => "signet",
 		} {
 		println!(
 			"\rChain argument ({}) didn't match bitcoind chain ({})",
@@ -1039,9 +1047,8 @@ async fn start_ldk() {
 	let output_sweeper_listener = output_sweeper.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
 	tokio::spawn(async move {
-		let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
-		let chain_listener =
-			(chain_monitor_listener, &(channel_manager_listener, output_sweeper_listener));
+		let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), args.network);
+		let chain_listener = (chain_monitor_listener, channel_manager_listener);
 		let mut spv_client = SpvClient::new(chain_tip, chain_poller, &mut cache, &chain_listener);
 		loop {
 			spv_client.poll_best_tip().await.unwrap();
@@ -1087,9 +1094,42 @@ async fn start_ldk() {
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
 	let outbound_payments_event_listener = Arc::clone(&outbound_payments);
 	let fs_store_event_listener = Arc::clone(&fs_store);
-	let peer_manager_event_listener = Arc::clone(&peer_manager);
-	let output_sweeper_event_listener = Arc::clone(&output_sweeper);
-	let network = args.network;
+
+	if let Some(yuv_client) = yuv_client_opt.clone() {
+		let channel_manager = Arc::clone(&channel_manager);
+		let chain_monitor = Arc::clone(&chain_monitor);
+		let yuv_listener = yuv_client.clone();
+		tokio::spawn(async move {
+			loop {
+				let tx_ids_to_request = channel_manager.get_pending_yuv_txs();
+
+				if !tx_ids_to_request.is_empty() {
+					let pending_txs =
+						yuv_listener.get_list_raw_yuv_transactions(tx_ids_to_request).await;
+
+					if !pending_txs.is_empty() {
+						channel_manager.yuv_transactions_confirmed(pending_txs);
+					}
+				}
+
+				let tx_ids_to_request = chain_monitor.get_pending_yuv_txs();
+
+				if !tx_ids_to_request.is_empty() {
+					let pending_txs =
+						yuv_listener.get_list_raw_yuv_transactions(tx_ids_to_request).await;
+
+					if !pending_txs.is_empty() {
+						chain_monitor.yuv_transactions_confirmed(pending_txs);
+					}
+				}
+
+				tokio::time::sleep(Duration::from_secs(1)).await;
+			}
+		});
+	}
+
+	let event_handlers_wallet = wallet.clone();
+	let event_jandlers_default_config = default_config.clone();
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
 		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
@@ -1098,21 +1138,19 @@ async fn start_ldk() {
 		let inbound_payments_event_listener = Arc::clone(&inbound_payments_event_listener);
 		let outbound_payments_event_listener = Arc::clone(&outbound_payments_event_listener);
 		let fs_store_event_listener = Arc::clone(&fs_store_event_listener);
-		let peer_manager_event_listener = Arc::clone(&peer_manager_event_listener);
-		let output_sweeper_event_listener = Arc::clone(&output_sweeper_event_listener);
+		let wallet = Arc::clone(&event_handlers_wallet.clone());
+		let default_config = Arc::clone(&event_jandlers_default_config);
+
 		async move {
 			handle_ldk_events(
-				channel_manager_event_listener,
-				&bitcoind_client_event_listener,
+				&channel_manager_event_listener,
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
 				&bump_tx_event_handler,
 				peer_manager_event_listener,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
-				fs_store_event_listener,
-				OutputSweeperWrapper(output_sweeper_event_listener),
-				network,
+				&fs_store_event_listener,
 				event,
 				wallet,
 				default_config,
@@ -1180,8 +1218,8 @@ async fn start_ldk() {
 							}
 						}
 					}
-				},
-				Err(e) => println!("ERROR: errored reading channel peer info from disk: {:?}", e),
+				}
+				Err(e) => println!("\rERROR: errored reading channel peer info from disk: {:?}", e),
 			}
 		}
 	});

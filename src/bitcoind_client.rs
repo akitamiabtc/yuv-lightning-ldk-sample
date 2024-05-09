@@ -3,18 +3,12 @@ use crate::convert::{
 	RawTx, SignedTx,
 };
 use crate::disk::FilesystemLogger;
-use crate::hex_utils;
-use base64;
-use bitcoin::address::{Address, Payload, WitnessVersion};
-use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
-use bitcoin::blockdata::script::ScriptBuf;
+use base64::engine::general_purpose::STANDARD as Base64Engine;
+use base64::Engine;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::hash_types::{BlockHash, Txid};
-use bitcoin::hashes::Hash;
-use bitcoin::key::XOnlyPublicKey;
-use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::{Network, OutPoint, TxOut, WPubkeyHash};
+use bitcoin::util::address::Address;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::log_error;
 use lightning::sign::ChangeDestinationSource;
@@ -65,7 +59,7 @@ const MIN_FEERATE: u32 = 300;
 
 impl BitcoindClient {
 	pub(crate) async fn new(
-		host: String, port: u16, rpc_user: String, rpc_password: String, network: Network,
+		host: String, port: u16, rpc_user: String, rpc_password: String, wallet_name: String,
 		handle: tokio::runtime::Handle, logger: Arc<FilesystemLogger>,
 	) -> std::io::Result<Self> {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
@@ -99,7 +93,7 @@ impl BitcoindClient {
 			port,
 			rpc_user,
 			rpc_password,
-			network,
+			wallet_name,
 			fees: Arc::new(fees),
 			handle: handle.clone(),
 			logger,
@@ -340,56 +334,8 @@ impl ChangeDestinationSource for BitcoindClient {
 			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
 		})
 	}
-}
 
-impl WalletSource for BitcoindClient {
-	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
-		let utxos = tokio::task::block_in_place(move || {
-			self.handle.block_on(async move { self.list_unspent().await }).0
-		});
-		Ok(utxos
-			.into_iter()
-			.filter_map(|utxo| {
-				let outpoint = OutPoint { txid: utxo.txid, vout: utxo.vout };
-				match utxo.address.payload.clone() {
-					Payload::WitnessProgram(wp) => match wp.version() {
-						WitnessVersion::V0 => WPubkeyHash::from_slice(wp.program().as_bytes())
-							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
-							.ok(),
-						// TODO: Add `Utxo::new_v1_p2tr` upstream.
-						WitnessVersion::V1 => XOnlyPublicKey::from_slice(wp.program().as_bytes())
-							.map(|_| Utxo {
-								outpoint,
-								output: TxOut {
-									value: utxo.amount,
-									script_pubkey: ScriptBuf::new_witness_program(&wp),
-								},
-								satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
-									1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
-							})
-							.ok(),
-						_ => None,
-					},
-					_ => None,
-				}
-			})
-			.collect())
-	}
-
-	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
-		tokio::task::block_in_place(move || {
-			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
-		})
-	}
-
-	fn sign_psbt(&self, tx: PartiallySignedTransaction) -> Result<Transaction, ()> {
-		let mut tx_bytes = Vec::new();
-		let _ = tx.unsigned_tx.consensus_encode(&mut tx_bytes).map_err(|_| ());
-		let tx_hex = hex_utils::hex_str(&tx_bytes);
-		let signed_tx = tokio::task::block_in_place(move || {
-			self.handle.block_on(async move { self.sign_raw_transaction_with_wallet(tx_hex).await })
-		});
-		let signed_tx_bytes = hex_utils::to_vec(&signed_tx.hex).ok_or(())?;
-		Transaction::consensus_decode(&mut signed_tx_bytes.as_slice()).map_err(|_| ())
+	fn get_utxo_with_yuv(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
+		todo!()
 	}
 }

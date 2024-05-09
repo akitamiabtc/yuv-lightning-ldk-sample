@@ -23,23 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, io};
 
-use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning::sign::{EntropySource, KeysManager, OutputSpender, SpendableOutputDescriptor};
-use lightning::util::logger::Logger;
-use lightning::util::persist::KVStore;
-use lightning::util::ser::{Readable, WithoutLength, Writeable};
-
-use lightning_persister::fs_store::FilesystemStore;
-
-use bitcoin::blockdata::locktime::absolute::LockTime;
-use bitcoin::secp256k1::Secp256k1;
-use rand::{thread_rng, Rng};
-
-use crate::hex_utils;
-use crate::BitcoindClient;
-use crate::ChannelManager;
-use crate::FilesystemLogger;
-
 /// If we have any pending claimable outputs, we should slowly sweep them to our Bitcoin Core
 /// wallet. We technically don't need to do this - they're ours to spend when we want and can just
 /// use them to build new transactions instead, but we cannot feed them direclty into Bitcoin
@@ -127,27 +110,20 @@ pub(crate) async fn periodic_sweep(
 					}
 					outputs.push(Readable::read(&mut file).unwrap());
 				}
-				let destination_address = bitcoind_client.get_new_address().await;
-				let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
-				let tx_feerate = bitcoind_client
-					.get_est_sat_per_1000_weight(ConfirmationTarget::ChannelCloseMinimum);
+
+				let wallet = wallet.lock().await;
+				let Ok(destination_pubkey) = wallet.get_change_yuv_pubkey() else {
+					lightning::log_error!(logger, "Failed to get change YUV pubkey");
+					continue;
+				};
+				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
+				let tx_feerate =
+					bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Background);
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				// Occasionally randomly pick a nLockTime even further back, so
-				// that transactions that are delayed after signing for whatever reason,
-				// e.g. high-latency mix networks and some CoinJoin implementations, have
-				// better privacy.
-				// Logic copied from core: https://github.com/bitcoin/bitcoin/blob/1d4846a8443be901b8a5deb0e357481af22838d0/src/wallet/spend.cpp#L936
-				let mut cur_height = channel_manager.current_best_block().height;
-
-				// 10% of the time
-				if thread_rng().gen_range(0, 10) == 0 {
-					// subtract random number between 0 and 100
-					cur_height = cur_height.saturating_sub(thread_rng().gen_range(0, 100));
-				}
-
-				let locktime =
-					LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l.into());
+				let cur_height = channel_manager.current_best_block().height();
+				let locktime: PackedLockTime =
+					LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
 
 				match keys_manager.spend_yuv_spendable_outputs(
 					output_descriptors,
