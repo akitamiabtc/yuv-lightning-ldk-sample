@@ -1,4 +1,4 @@
-use crate::{cli, InboundPaymentInfoStorage, NetworkGraph, OutboundPaymentInfoStorage};
+use crate::{cli, NetworkGraph, PaymentInfoStorage};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use chrono::Utc;
@@ -68,7 +68,7 @@ pub(crate) fn read_channel_peer_data(
 		match cli::parse_peer_info(line.unwrap()) {
 			Ok((pubkey, socket_addr)) => {
 				peer_data.insert(pubkey, socket_addr);
-			},
+			}
 			Err(e) => return Err(e),
 		}
 	}
@@ -86,22 +86,13 @@ pub(crate) fn read_network(
 	NetworkGraph::new(network, logger)
 }
 
-pub(crate) fn read_inbound_payment_info(path: &Path) -> InboundPaymentInfoStorage {
+pub(crate) fn read_payment_info(path: &Path) -> PaymentInfoStorage {
 	if let Ok(file) = File::open(path) {
-		if let Ok(info) = InboundPaymentInfoStorage::read(&mut BufReader::new(file)) {
+		if let Ok(info) = PaymentInfoStorage::read(&mut BufReader::new(file)) {
 			return info;
 		}
 	}
-	InboundPaymentInfoStorage { payments: HashMap::new() }
-}
-
-pub(crate) fn read_outbound_payment_info(path: &Path) -> OutboundPaymentInfoStorage {
-	if let Ok(file) = File::open(path) {
-		if let Ok(info) = OutboundPaymentInfoStorage::read(&mut BufReader::new(file)) {
-			return info;
-		}
-	}
-	OutboundPaymentInfoStorage { payments: HashMap::new() }
+	PaymentInfoStorage { payments: HashMap::new() }
 }
 
 pub(crate) fn read_scorer(

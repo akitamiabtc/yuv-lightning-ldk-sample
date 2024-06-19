@@ -25,7 +25,7 @@ use lightning::events::{Event, PaymentFailureReason, PaymentPurpose};
 use lightning::ln::chan_utils::NewUpdateBalanceRequest;
 use lightning::ln::channelmanager::RecentPaymentDetails;
 use lightning::ln::channelmanager::{
-	ChainParameters, ChannelManagerReadArgs, PaymentId, SimpleArcChannelManager,
+	ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
 };
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
@@ -35,12 +35,11 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
-use lightning::sign::{EntropySource, InMemorySigner, KeysManager};
+use lightning::sign::{EntropySource, InMemorySigner, KeysManager, SpendableOutputDescriptor};
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Logger;
 use lightning::util::persist::{self, KVStore, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::util::sweep as ldk_sweep;
 use lightning::{chain, impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::init;
@@ -58,7 +57,6 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
-use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -124,19 +122,11 @@ impl_writeable_tlv_based!(PaymentInfo, {
 	(7, yuv_pixel, option),
 });
 
-pub(crate) struct InboundPaymentInfoStorage {
+pub(crate) struct PaymentInfoStorage {
 	payments: HashMap<PaymentHash, PaymentInfo>,
 }
 
-impl_writeable_tlv_based!(InboundPaymentInfoStorage, {
-	(0, payments, required),
-});
-
-pub(crate) struct OutboundPaymentInfoStorage {
-	payments: HashMap<PaymentId, PaymentInfo>,
-}
-
-impl_writeable_tlv_based!(OutboundPaymentInfoStorage, {
+impl_writeable_tlv_based!(PaymentInfoStorage, {
 	(0, payments, required),
 });
 
@@ -161,11 +151,6 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 	lightning_block_sync::gossip::TokioSpawner,
 	Arc<lightning_block_sync::rpc::RpcClient>,
 	Arc<FilesystemLogger>,
-	SocketDescriptor,
-	Arc<ChannelManager>,
-	Arc<SimpleArcOnionMessenger<FilesystemLogger>>,
-	IgnoringMessageHandler,
-	Arc<KeysManager>,
 	Arc<YuvClient>,
 >;
 
@@ -189,8 +174,13 @@ pub(crate) type ChannelManager = SimpleArcChannelManager<
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<FilesystemLogger>>;
 
-type OnionMessenger =
-	SimpleArcOnionMessenger<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
+type OnionMessenger = SimpleArcOnionMessenger<
+	ChainMonitor,
+	BitcoindClient,
+	YuvClient,
+	BitcoindClient,
+	FilesystemLogger,
+>;
 
 pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 	Arc<BitcoindClient>,
@@ -198,19 +188,6 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 	Arc<KeysManager>,
 	Arc<FilesystemLogger>,
 >;
-
-pub(crate) type OutputSweeper = ldk_sweep::OutputSweeper<
-	Arc<BitcoindClient>,
-	Arc<BitcoindClient>,
-	Arc<BitcoindClient>,
-	Arc<dyn Filter + Send + Sync>,
-	Arc<FilesystemStore>,
-	Arc<FilesystemLogger>,
-	Arc<KeysManager>,
->;
-
-// Needed due to rust-lang/rust#63033.
-struct OutputSweeperWrapper(Arc<OutputSweeper>);
 
 async fn handle_ldk_events(
 	channel_manager: &Arc<ChannelManager>, network_graph: &NetworkGraph,
@@ -264,7 +241,7 @@ async fn handle_ldk_events(
 					io::stdout().flush().unwrap();
 				}
 			}
-		},
+		}
 		Event::PaymentClaimable {
 			payment_hash,
 			purpose,
@@ -278,13 +255,14 @@ async fn handle_ldk_events(
 			yuv_amount,
 		} => {
 			print!(
-				"\rEvent: received payment from payment hash {} of {} millisatoshis",
+				"\rEVENT: received payment from payment hash {} of {} millisatoshis",
 				payment_hash, amount_msat,
 			);
 
 			if let Some(yuv_amount) = yuv_amount {
+				let channels = channel_manager.list_channels();
 				let channel_details =
-					channel_manager.get_channel_details(&via_channel_id.unwrap()).unwrap();
+					channels.iter().find(|c| Some(c.channel_id) == via_channel_id).unwrap();
 
 				println!(
 					" and YUV {} {}",
@@ -299,12 +277,11 @@ async fn handle_ldk_events(
 			io::stdout().flush().unwrap();
 			let payment_preimage = match purpose {
 				PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => payment_preimage,
-				PaymentPurpose::Bolt12OfferPayment { payment_preimage, .. } => payment_preimage,
-				PaymentPurpose::Bolt12RefundPayment { payment_preimage, .. } => payment_preimage,
 				PaymentPurpose::SpontaneousPayment(preimage) => Some(preimage),
+				_ => None,
 			};
 			channel_manager.claim_funds(payment_preimage.unwrap());
-		},
+		}
 		Event::PaymentClaimed {
 			payment_hash,
 			purpose,
@@ -315,12 +292,13 @@ async fn handle_ldk_events(
 			sender_intended_total_yuv,
 		} => {
 			print!(
-				"\rEvent: claimed payment from payment hash {} of {} millisatoshis",
+				"\rEVENT: claimed payment from payment hash {} of {} millisatoshis",
 				payment_hash, amount_msat,
 			);
 			if let Some(yuv_amount) = sender_intended_total_yuv {
+				let channels = channel_manager.list_channels();
 				let channel_details =
-					channel_manager.get_channel_details(&htlcs[0].channel_id).unwrap();
+					channels.iter().find(|c| c.channel_id == htlcs[0].channel_id).unwrap();
 
 				println!(
 					" and YUV {} {}",
@@ -336,13 +314,8 @@ async fn handle_ldk_events(
 				PaymentPurpose::Bolt11InvoicePayment {
 					payment_preimage, payment_secret, ..
 				} => (payment_preimage, Some(payment_secret)),
-				PaymentPurpose::Bolt12OfferPayment { payment_preimage, payment_secret, .. } => {
-					(payment_preimage, Some(payment_secret))
-				},
-				PaymentPurpose::Bolt12RefundPayment {
-					payment_preimage, payment_secret, ..
-				} => (payment_preimage, Some(payment_secret)),
 				PaymentPurpose::SpontaneousPayment(preimage) => (Some(preimage), None),
+				_ => (None, None),
 			};
 			let mut inbound = inbound_payments.lock().unwrap();
 			match inbound.payments.entry(payment_hash) {
@@ -351,7 +324,7 @@ async fn handle_ldk_events(
 					payment.status = HTLCStatus::Succeeded;
 					payment.preimage = payment_preimage;
 					payment.secret = payment_secret;
-				},
+				}
 				Entry::Vacant(e) => {
 					e.insert(PaymentInfo {
 						preimage: payment_preimage,
@@ -360,13 +333,11 @@ async fn handle_ldk_events(
 						amt_msat: MillisatAmount(Some(amount_msat)),
 						yuv_pixel: None,
 					});
-				},
+				}
 			}
 			fs_store.write("", "", INBOUND_PAYMENTS_FNAME, &inbound.encode()).unwrap();
-		},
-		Event::PaymentSent {
-			payment_preimage, payment_hash, fee_paid_msat, payment_id, ..
-		} => {
+		}
+		Event::PaymentSent { payment_preimage, payment_hash, fee_paid_msat, .. } => {
 			let mut outbound = outbound_payments.lock().unwrap();
 			match outbound.payments.get_mut(&payment_hash) {
 				Some(payment) => {
@@ -386,7 +357,7 @@ async fn handle_ldk_events(
 					};
 
 					println!(
-						"\rEvent: successfully sent payment of {} millisatoshis{}{} from \
+						"\rEVENT: successfully sent payment of {} millisatoshis{}{} from \
 								 payment hash {} with preimage {}",
 						payment.amt_msat, fee_log, yuv_log, payment_hash, payment_preimage
 					);
@@ -396,7 +367,7 @@ async fn handle_ldk_events(
 				None => return,
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
-		},
+		}
 		Event::OpenChannelRequest {
 			ref temporary_channel_id, ref counterparty_node_id, ..
 		} => {
@@ -412,28 +383,28 @@ async fn handle_ldk_events(
 
 			if let Err(e) = res {
 				println!(
-					"\rEvent: Failed to accept inbound channel ({}) from {}: {:?}",
+					"\rEVENT: Failed to accept inbound channel ({}) from {}: {:?}",
 					temporary_channel_id,
 					hex_utils::hex_str(&counterparty_node_id.serialize()),
 					e,
 				);
 			} else {
 				println!(
-					"\rEvent: Accepted inbound channel ({}) from {}",
+					"\rEVENT: Accepted inbound channel ({}) from {}",
 					temporary_channel_id,
 					hex_utils::hex_str(&counterparty_node_id.serialize()),
 				);
 			}
 			print!("\r> ");
 			io::stdout().flush().unwrap();
-		},
-		Event::PaymentPathSuccessful { .. } => {},
-		Event::PaymentPathFailed { .. } => {},
-		Event::ProbeSuccessful { .. } => {},
-		Event::ProbeFailed { .. } => {},
-		Event::PaymentFailed { payment_hash, reason, payment_id, .. } => {
+		}
+		Event::PaymentPathSuccessful { .. } => {}
+		Event::PaymentPathFailed { .. } => {}
+		Event::ProbeSuccessful { .. } => {}
+		Event::ProbeFailed { .. } => {}
+		Event::PaymentFailed { payment_hash, reason, .. } => {
 			print!(
-				"\rEvent: Failed to send payment to payment hash {}: {:?}",
+				"\rEVENT: Failed to send payment to payment hash {}: {:?}",
 				payment_hash,
 				if let Some(r) = reason { r } else { PaymentFailureReason::RetriesExhausted }
 			);
@@ -441,24 +412,12 @@ async fn handle_ldk_events(
 			io::stdout().flush().unwrap();
 
 			let mut outbound = outbound_payments.lock().unwrap();
-			if outbound.payments.contains_key(&payment_id) {
-				let payment = outbound.payments.get_mut(&payment_id).unwrap();
+			if outbound.payments.contains_key(&payment_hash) {
+				let payment = outbound.payments.get_mut(&payment_hash).unwrap();
 				payment.status = HTLCStatus::Failed;
 			}
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
-		},
-		Event::InvoiceRequestFailed { payment_id } => {
-			print!("\nEVENT: Failed to request invoice to send payment with id {}", payment_id);
-			print!("> ");
-			io::stdout().flush().unwrap();
-
-			let mut outbound = outbound_payments.lock().unwrap();
-			if outbound.payments.contains_key(&payment_id) {
-				let payment = outbound.payments.get_mut(&payment_id).unwrap();
-				payment.status = HTLCStatus::Failed;
-			}
-			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound.encode()).unwrap();
-		},
+		}
 		Event::PaymentForwarded {
 			prev_channel_id,
 			next_channel_id,
@@ -466,26 +425,38 @@ async fn handle_ldk_events(
 			claim_from_onchain_tx,
 			outbound_amount_forwarded_msat,
 			outbound_amount_forwarded_yuv,
+			..
 		} => {
 			let read_only_network_graph = network_graph.read_only();
 			let nodes = read_only_network_graph.nodes();
 			let channels = channel_manager.list_channels();
+			let mut yuv_log = Default::default();
 
-			let node_str = |channel_id: &Option<ChannelId>| match channel_id {
+			let mut node_str = |channel_id: &Option<ChannelId>| match channel_id {
 				None => String::new(),
 				Some(channel_id) => match channels.iter().find(|c| c.channel_id == *channel_id) {
 					None => String::new(),
 					Some(channel) => {
+						yuv_log = if let Some(yuv_amount) = outbound_amount_forwarded_yuv {
+							format!(
+								" and YUV {} {}",
+								yuv_amount,
+								channel.yuv_holder_pixel.unwrap().chroma
+							)
+						} else {
+							"".to_string()
+						};
+
 						match nodes.get(&NodeId::from_pubkey(&channel.counterparty.node_id)) {
 							None => "private node".to_string(),
 							Some(node) => match &node.announcement_info {
 								None => "unnamed node".to_string(),
 								Some(announcement) => {
 									format!("node {}", announcement.alias)
-								},
+								}
 							},
 						}
-					},
+					}
 				},
 			};
 			let channel_str = |channel_id: &Option<ChannelId>| {
@@ -510,34 +481,21 @@ async fn handle_ldk_events(
 				"?".to_string()
 			};
 
-			let yuv_log = if let Some(yuv_amount) = outbound_amount_forwarded_yuv {
-				let channel_details =
-					channel_manager.get_channel_details(&prev_channel_id.unwrap()).unwrap();
-
-				format!(
-					" and YUV {} {}",
-					yuv_amount,
-					channel_details.yuv_holder_pixel.unwrap().chroma
-				)
-			} else {
-				"".to_string()
-			};
-
-			if let Some(fee_earned) = fee_earned_msat {
+			if let Some(fee_earned) = total_fee_earned_msat {
 				println!(
-					"\rEvent: Forwarded payment for {} msat{}{}{}, earning {} msat {}",
+					"\rEVENT: Forwarded payment for {} msat{}{}{}, earning {} msat {}",
 					amt_args, yuv_log, from_prev_str, to_next_str, fee_earned, from_onchain_str
 				);
 			} else {
 				println!(
-					"\rEvent: Forwarded payment for {} msat{}{}{}, claiming onchain {}",
+					"\rEVENT: Forwarded payment for {} msat{}{}{}, claiming onchain {}",
 					amt_args, yuv_log, from_prev_str, to_next_str, from_onchain_str
 				);
 			}
 			print!("\r> ");
 			io::stdout().flush().unwrap();
-		},
-		Event::HTLCHandlingFailed { .. } => {},
+		}
+		Event::HTLCHandlingFailed { .. } => {}
 		Event::PendingHTLCsForwardable { time_forwardable } => {
 			let forwarding_channel_manager = channel_manager.clone();
 			tokio::spawn(async move {
@@ -545,10 +503,24 @@ async fn handle_ldk_events(
 					.await;
 				forwarding_channel_manager.process_pending_htlc_forwards();
 			});
-		},
-		Event::SpendableOutputs { outputs, channel_id } => {
-			output_sweeper.0.track_spendable_outputs(outputs, channel_id, false, None).unwrap();
-		},
+		}
+		Event::SpendableOutputs { outputs, channel_id: _ } => {
+			// SpendableOutputDescriptors, of which outputs is a vec of, are critical to keep track
+			// of! While a `StaticOutput` descriptor is just an output to a static, well-known key,
+			// other descriptors are not currently ever regenerated for you by LDK. Once we return
+			// from this method, the descriptor will be gone, and you may lose track of some funds.
+			//
+			// Here we simply persist them to disk, with a background task running which will try
+			// to spend them regularly (possibly duplicatively/RBF'ing them). These can just be
+			// treated as normal funds where possible - they are only spendable by us and there is
+			// no rush to claim them.
+			for output in outputs {
+				let key = hex_utils::hex_str(&keys_manager.get_secure_random_bytes());
+				// Note that if the type here changes our read code needs to change as well.
+				let output: SpendableOutputDescriptor = output;
+				fs_store.write(PENDING_SPENDABLE_OUTPUT_DIR, "", &key, &output.encode()).unwrap();
+			}
+		}
 		Event::ChannelPending { channel_id, counterparty_node_id, .. } => {
 			println!(
 				"\rEVENT: Channel {} with peer {} is pending awaiting funding lock-in!",
@@ -557,7 +529,7 @@ async fn handle_ldk_events(
 			);
 			print!("\r> ");
 			io::stdout().flush().unwrap();
-		},
+		}
 		Event::ChannelReady {
 			ref channel_id,
 			user_channel_id: _,
@@ -571,14 +543,14 @@ async fn handle_ldk_events(
 			);
 			print!("\r> ");
 			io::stdout().flush().unwrap();
-		},
+		}
 		Event::ChannelClosed {
 			channel_id,
 			reason,
 			user_channel_id: _,
 			counterparty_node_id,
 			channel_capacity_sats: _,
-			channel_funding_txo: _,
+			..
 		} => {
 			println!(
 				"\rEVENT: Channel {} with counterparty {} closed due to: {:?}",
@@ -588,15 +560,15 @@ async fn handle_ldk_events(
 			);
 			print!("\r> ");
 			io::stdout().flush().unwrap();
-		},
+		}
 		Event::DiscardFunding { .. } => {
 			// A "real" node should probably "lock" the UTXOs spent in funding transactions until
 			// the funding transaction either confirms, or this event is generated.
-		},
-		Event::HTLCIntercepted { .. } => {},
+		}
+		Event::HTLCIntercepted { .. } => {}
 		Event::BumpTransaction(event) => bump_tx_event_handler.handle_event(&event),
 		Event::UpdateBalanceApplied(channel_id) => {
-			println!("\rEvent: Channel {} has applied the updated balances", channel_id);
+			println!("\rEVENT: Channel {} has applied the updated balances", channel_id);
 			print!("\r> ");
 			io::stdout().flush().unwrap();
 		}
@@ -606,7 +578,7 @@ async fn handle_ldk_events(
 				updated_counterparty_yuv_luma,
 			} => {
 				println!(
-					"\rEvent: Counterparty has requested an update to the balances in channel: {}. \
+					"\rEVENT: Counterparty has requested an update to the balances in channel: {}. \
 					 The new balances are: {} msat, {:?} yuv luma",
 					channel_id, updated_counterparty_msat, updated_counterparty_yuv_luma.map(|luma| luma.amount)
 				);
@@ -615,13 +587,14 @@ async fn handle_ldk_events(
 			}
 			NewUpdateBalanceRequest::Revoke => {
 				println!(
-					"\rEvent: Channel {} has requested to revoke the update balances",
+					"\rEVENT: Channel {} has requested to revoke the update balances",
 					channel_id
 				);
 				print!("\r> ");
 				io::stdout().flush().unwrap();
 			}
 		},
+		_ => {}
 	}
 }
 
@@ -654,6 +627,7 @@ async fn start_ldk() {
 		args.bitcoind_rpc_port,
 		args.bitcoind_rpc_username.clone(),
 		args.bitcoind_rpc_password.clone(),
+		args.network,
 		wallet_name,
 		tokio::runtime::Handle::current(),
 		Arc::clone(&logger),
@@ -664,7 +638,7 @@ async fn start_ldk() {
 		Err(e) => {
 			println!("\rFailed to connect to bitcoind client: {}", e);
 			return;
-		},
+		}
 	};
 
 	// Check that the bitcoind we've connected to is running the network we expect
@@ -675,6 +649,7 @@ async fn start_ldk() {
 			Network::Testnet => "test",
 			Network::Regtest => "regtest",
 			Network::Signet => "signet",
+			_ => "unknown",
 		} {
 		println!(
 			"\rChain argument ({}) didn't match bitcoind chain ({})",
@@ -711,11 +686,11 @@ async fn start_ldk() {
 			Ok(mut f) => {
 				Write::write_all(&mut f, &key).expect("Failed to write node keys seed to disk");
 				f.sync_all().expect("Failed to sync node keys seed to disk");
-			},
+			}
 			Err(e) => {
 				println!("\rERROR: Unable to create keys seed file {}: {}", keys_seed_path, e);
 				return;
-			},
+			}
 		}
 		key
 	};
@@ -881,50 +856,14 @@ async fn start_ldk() {
 		}
 	};
 
-	// Step 12: Initialize the OutputSweeper.
-	let (sweeper_best_block, output_sweeper) = match fs_store.read(
-		OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
-		OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
-		OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	) {
-		Err(e) if e.kind() == io::ErrorKind::NotFound => {
-			let sweeper = OutputSweeper::new(
-				channel_manager.current_best_block(),
-				broadcaster.clone(),
-				fee_estimator.clone(),
-				None,
-				keys_manager.clone(),
-				bitcoind_client.clone(),
-				fs_store.clone(),
-				logger.clone(),
-			);
-			(channel_manager.current_best_block(), sweeper)
-		},
-		Ok(mut bytes) => {
-			let read_args = (
-				broadcaster.clone(),
-				fee_estimator.clone(),
-				None,
-				keys_manager.clone(),
-				bitcoind_client.clone(),
-				fs_store.clone(),
-				logger.clone(),
-			);
-			let mut reader = io::Cursor::new(&mut bytes);
-			<(BestBlock, OutputSweeper)>::read(&mut reader, read_args)
-				.expect("Failed to deserialize OutputSweeper")
-		},
-		Err(e) => panic!("Failed to read OutputSweeper with {}", e),
-	};
-
-	// Step 13: Sync ChannelMonitors, ChannelManager and OutputSweeper to chain tip
+	// Step 12: Sync ChannelMonitors and ChannelManager to chain tip
 	let mut chain_listener_channel_monitors = Vec::new();
 	let mut cache = UnboundedCache::new();
 	let chain_tip = if restarting_node {
-		let mut chain_listeners = vec![
-			(channel_manager_blockhash, &channel_manager as &(dyn chain::Listen + Send + Sync)),
-			(sweeper_best_block.block_hash, &output_sweeper as &(dyn chain::Listen + Send + Sync)),
-		];
+		let mut chain_listeners = vec![(
+			channel_manager_blockhash,
+			&channel_manager as &(dyn chain::Listen + Send + Sync),
+		)];
 
 		for (blockhash, channel_monitor) in channelmonitors.drain(..) {
 			let outpoint = channel_monitor.get_funding_txo().0;
@@ -960,7 +899,7 @@ async fn start_ldk() {
 		polled_chain_tip
 	};
 
-	// Step 14: Give ChannelMonitors to ChainMonitor
+	// Step 13: Give ChannelMonitors to ChainMonitor
 	for item in chain_listener_channel_monitors.drain(..) {
 		let channel_monitor = item.1 .0;
 		let funding_outpoint = item.2;
@@ -970,11 +909,11 @@ async fn start_ldk() {
 		);
 	}
 
-	// Step 15: Optional: Initialize the P2PGossipSync
+	// Step 14: Optional: Initialize the P2PGossipSync
 	let gossip_sync =
 		Arc::new(P2PGossipSync::new(Arc::clone(&network_graph), None, logger.clone()));
 
-	// Step 16: Initialize the PeerManager
+	// Step 15: Initialize the PeerManager
 	let channel_manager: Arc<ChannelManager> = Arc::new(channel_manager);
 	let onion_messenger: Arc<OnionMessenger> = Arc::new(OnionMessenger::new(
 		Arc::clone(&keys_manager),
@@ -1014,7 +953,7 @@ async fn start_ldk() {
 	gossip_sync.add_utxo_lookup(Some(utxo_lookup));
 
 	// ## Running LDK
-	// Step 17: Initialize networking
+	// Step 16: Initialize networking
 
 	let peer_manager_connection_handler = peer_manager.clone();
 	let listening_port = args.ldk_peer_listening_port;
@@ -1040,11 +979,9 @@ async fn start_ldk() {
 		}
 	});
 
-	// Step 18: Connect and Disconnect Blocks
-	let output_sweeper: Arc<OutputSweeper> = Arc::new(output_sweeper);
+	// Step 17: Connect and Disconnect Blocks
 	let channel_manager_listener = channel_manager.clone();
 	let chain_monitor_listener = chain_monitor.clone();
-	let output_sweeper_listener = output_sweeper.clone();
 	let bitcoind_block_source = bitcoind_client.clone();
 	tokio::spawn(async move {
 		let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), args.network);
@@ -1056,30 +993,32 @@ async fn start_ldk() {
 		}
 	});
 
-	let inbound_payments = Arc::new(Mutex::new(disk::read_inbound_payment_info(Path::new(
-		&format!("{}/{}", ldk_data_dir, INBOUND_PAYMENTS_FNAME),
-	))));
-	let outbound_payments = Arc::new(Mutex::new(disk::read_outbound_payment_info(Path::new(
-		&format!("{}/{}", ldk_data_dir, OUTBOUND_PAYMENTS_FNAME),
-	))));
-	let recent_payments_payment_ids = channel_manager
+	let inbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
+		"{}/{}",
+		ldk_data_dir, INBOUND_PAYMENTS_FNAME
+	)))));
+	let outbound_payments = Arc::new(Mutex::new(disk::read_payment_info(Path::new(&format!(
+		"{}/{}",
+		ldk_data_dir, OUTBOUND_PAYMENTS_FNAME
+	)))));
+	let recent_payments_payment_hashes = channel_manager
 		.list_recent_payments()
 		.into_iter()
 		.filter_map(|p| match p {
-			RecentPaymentDetails::Pending { payment_id, .. } => Some(payment_id),
-			RecentPaymentDetails::Fulfilled { payment_id, .. } => Some(payment_id),
-			RecentPaymentDetails::Abandoned { payment_id, .. } => Some(payment_id),
-			RecentPaymentDetails::AwaitingInvoice { payment_id } => Some(payment_id),
+			RecentPaymentDetails::Pending { payment_hash, .. } => Some(payment_hash),
+			RecentPaymentDetails::Fulfilled { payment_hash, .. } => payment_hash,
+			RecentPaymentDetails::Abandoned { payment_hash, .. } => Some(payment_hash),
+			RecentPaymentDetails::AwaitingInvoice { payment_id: _ } => todo!(),
 		})
-		.collect::<Vec<PaymentId>>();
-	for (payment_id, payment_info) in outbound_payments
+		.collect::<Vec<PaymentHash>>();
+	for (payment_hash, payment_info) in outbound_payments
 		.lock()
 		.unwrap()
 		.payments
 		.iter_mut()
 		.filter(|(_, i)| matches!(i.status, HTLCStatus::Pending))
 	{
-		if !recent_payments_payment_ids.contains(payment_id) {
+		if !recent_payments_payment_hashes.contains(payment_hash) {
 			payment_info.status = HTLCStatus::Failed;
 		}
 	}
@@ -1087,7 +1026,7 @@ async fn start_ldk() {
 		.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.lock().unwrap().encode())
 		.unwrap();
 
-	// Step 19: Handle LDK Events
+	// Step 18: Handle LDK Events
 	let channel_manager_event_listener = Arc::clone(&channel_manager);
 	let network_graph_event_listener = Arc::clone(&network_graph);
 	let keys_manager_event_listener = Arc::clone(&keys_manager);
@@ -1147,7 +1086,6 @@ async fn start_ldk() {
 				&network_graph_event_listener,
 				&keys_manager_event_listener,
 				&bump_tx_event_handler,
-				peer_manager_event_listener,
 				inbound_payments_event_listener,
 				outbound_payments_event_listener,
 				&fs_store_event_listener,
@@ -1159,10 +1097,10 @@ async fn start_ldk() {
 		}
 	};
 
-	// Step 20: Persist ChannelManager and NetworkGraph
+	// Step 19: Persist ChannelManager and NetworkGraph
 	let persister = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
 
-	// Step 21: Background Processing
+	// Step 20: Background Processing
 	let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
 	let mut background_processor = tokio::spawn(process_events_async(
 		Arc::clone(&persister),
@@ -1198,12 +1136,14 @@ async fn start_ldk() {
 			interval.tick().await;
 			match disk::read_channel_peer_data(Path::new(&peer_data_path)) {
 				Ok(info) => {
+					let peers = connect_pm.list_peers();
 					for node_id in connect_cm
 						.list_channels()
 						.iter()
 						.map(|chan| chan.counterparty.node_id)
-						.filter(|id| connect_pm.peer_by_node_id(id).is_none())
-					{
+						.filter(|id| {
+							!peers.iter().any(|details| details.counterparty_node_id.eq(id))
+						}) {
 						if stop_connect.load(Ordering::Acquire) {
 							return;
 						}
@@ -1253,7 +1193,6 @@ async fn start_ldk() {
 		}
 	});
 
-	// TODO: remove this, since the new `OutputSweeper` was added in LDK v0.0.123.
 	tokio::spawn(sweep::periodic_sweep(
 		ldk_data_dir.clone(),
 		Arc::clone(&keys_manager),

@@ -1,10 +1,9 @@
 use crate::disk::{self, read_channel_peer_data, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use crate::hex_utils;
 use crate::{
-	ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount, NetworkGraph,
-	OnionMessenger, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
+	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
+	PaymentInfoStorage, PeerManager,
 };
-use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
@@ -16,7 +15,6 @@ use eyre::bail;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, UpdateBalance};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
-use lightning::offers::offer::{self, Offer};
 use lightning::onion_message::messenger::Destination;
 use lightning::onion_message::packet::OnionMessageContents;
 use lightning::routing::gossip::NodeId;
@@ -25,8 +23,9 @@ use lightning::sign::{EntropySource, KeysManager};
 use lightning::util::config::UserConfig;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Writeable, Writer};
-use lightning_invoice::payment::payment_parameters_from_invoice;
-use lightning_invoice::payment::payment_parameters_from_zero_amount_invoice;
+use lightning_invoice::payment::{
+	payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
+};
 use lightning_invoice::{utils, Bolt11Invoice, Currency};
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
@@ -355,70 +354,30 @@ pub(crate) fn poll_for_user_input(
 						continue;
 					}
 
-					let invoice = match Bolt11Invoice::from_str(invoice_str.unwrap()) {
-						Ok(inv) => inv,
+					let mut user_provided_amt: Option<u64> = None;
+					if let Some(amt_msat_str) = words.next() {
+						match amt_msat_str.parse() {
+							Ok(amt) => user_provided_amt = Some(amt),
+							Err(e) => {
+								println!("ERROR: couldn't parse amount_msat: {}", e);
+								continue;
+							}
+						};
+					}
+
+					match Bolt11Invoice::from_str(invoice_str.unwrap()) {
+						Ok(invoice) => send_payment(
+							&channel_manager,
+							&invoice,
+							user_provided_amt,
+							&mut outbound_payments.lock().unwrap(),
+							Arc::clone(&fs_store),
+						),
 						Err(e) => {
 							println!("\rERROR: invalid invoice: {:?}", e);
-							continue;
-						}
-
-						while user_provided_amt.is_none() {
-							print!("Paying offer for {} msat. Continue (Y/N)? >", amt_msat);
-							io::stdout().flush().unwrap();
-
-							if let Err(e) = io::stdin().read_line(&mut line) {
-								println!("ERROR: {}", e);
-								break 'read_command;
-							}
-
-							if line.len() == 0 {
-								// We hit EOF / Ctrl-D
-								break 'read_command;
-							}
-
-							if line.starts_with("Y") {
-								break;
-							}
-							if line.starts_with("N") {
-								continue 'read_command;
-							}
-						}
-
-						outbound_payments.lock().unwrap().payments.insert(
-							payment_id,
-							PaymentInfo {
-								preimage: None,
-								secret: None,
-								status: HTLCStatus::Pending,
-								amt_msat: MillisatAmount(Some(amt_msat)),
-							},
-						);
-						fs_store
-							.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode())
-							.unwrap();
-
-						let retry = Retry::Timeout(Duration::from_secs(10));
-						let amt = Some(amt_msat);
-						let pay = channel_manager
-							.pay_for_offer(&offer, None, amt, None, payment_id, retry, None);
-						if pay.is_err() {
-							println!("ERROR: Failed to pay: {:?}", pay);
-						}
-					} else {
-						match Bolt11Invoice::from_str(invoice_str.unwrap()) {
-							Ok(invoice) => send_payment(
-								&channel_manager,
-								&invoice,
-								user_provided_amt,
-								&mut outbound_payments.lock().unwrap(),
-								Arc::clone(&fs_store),
-							),
-							Err(e) => {
-								println!("ERROR: invalid invoice: {:?}", e);
-							},
 						}
 					}
-				},
+				}
 				"keysend" => {
 					let dest_pubkey = match words.next() {
 						Some(dest) => match hex_utils::to_compressed_pubkey(dest) {
@@ -426,26 +385,26 @@ pub(crate) fn poll_for_user_input(
 							None => {
 								println!("\rERROR: couldn't parse destination pubkey");
 								continue;
-							},
+							}
 						},
 						None => {
 							println!("\rERROR: keysend requires a destination pubkey: `keysend <dest_pubkey> <amt_msat>`");
 							continue;
-						},
+						}
 					};
 					let amt_msat_str = match words.next() {
 						Some(amt) => amt,
 						None => {
 							println!("\rERROR: keysend requires an amount in millisatoshis: `keysend <dest_pubkey> <amt_msat>`");
 							continue;
-						},
+						}
 					};
 					let amt_msat: u64 = match amt_msat_str.parse() {
 						Ok(amt) => amt,
 						Err(e) => {
 							println!("\rERROR: couldn't parse amount_msat: {}", e);
 							continue;
-						},
+						}
 					};
 					keysend(
 						&channel_manager,
@@ -455,35 +414,7 @@ pub(crate) fn poll_for_user_input(
 						&mut outbound_payments.lock().unwrap(),
 						Arc::clone(&fs_store),
 					);
-				},
-				"getoffer" => {
-					let offer_builder = channel_manager.create_offer_builder();
-					if let Err(e) = offer_builder {
-						println!("ERROR: Failed to initiate offer building: {:?}", e);
-						continue;
-					}
-
-					let amt_str = words.next();
-					let offer = if amt_str.is_some() {
-						let amt_msat: Result<u64, _> = amt_str.unwrap().parse();
-						if amt_msat.is_err() {
-							println!("ERROR: getoffer provided payment amount was not a number");
-							continue;
-						}
-						offer_builder.unwrap().amount_msats(amt_msat.unwrap()).build()
-					} else {
-						offer_builder.unwrap().build()
-					};
-
-					if offer.is_err() {
-						println!("ERROR: Failed to build offer: {:?}", offer.unwrap_err());
-					} else {
-						// Note that unlike BOLT11 invoice creation we don't bother to add a
-						// pending inbound payment here, as offers can be reused and don't
-						// correspond with individual payments.
-						println!("{}", offer.unwrap());
-					}
-				},
+				}
 				"getinvoice" => {
 					let amt_str = words.next();
 					if amt_str.is_none() {
@@ -547,7 +478,7 @@ pub(crate) fn poll_for_user_input(
 					fs_store
 						.write("", "", INBOUND_PAYMENTS_FNAME, &inbound_payments.encode())
 						.unwrap();
-				},
+				}
 				"connectpeer" => {
 					let peer_pubkey_and_ip_addr = words.next();
 					if peer_pubkey_and_ip_addr.is_none() {
@@ -560,7 +491,7 @@ pub(crate) fn poll_for_user_input(
 							Err(e) => {
 								println!("\r{:?}", e.into_inner().unwrap());
 								continue;
-							},
+							}
 						};
 					if tokio::runtime::Handle::current()
 						.block_on(connect_peer_if_necessary(
@@ -592,7 +523,7 @@ pub(crate) fn poll_for_user_input(
 							Err(e) => {
 								println!("\rERROR: {}", e.to_string());
 								continue;
-							},
+							}
 						};
 
 					if do_disconnect_peer(
@@ -604,7 +535,7 @@ pub(crate) fn poll_for_user_input(
 					{
 						println!("\rSUCCESS: disconnected from peer {}", peer_pubkey);
 					}
-				},
+				}
 				"listchannels" => list_channels(&channel_manager, &network_graph),
 				"listpayments" => list_payments(
 					&inbound_payments.lock().unwrap(),
@@ -634,18 +565,18 @@ pub(crate) fn poll_for_user_input(
 						None => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						},
+						}
 					};
 					let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
 						Ok(peer_pubkey) => peer_pubkey,
 						Err(_) => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						},
+						}
 					};
 
 					close_channel(channel_id, peer_pubkey, channel_manager.clone());
-				},
+				}
 				"forceclosechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
@@ -670,18 +601,18 @@ pub(crate) fn poll_for_user_input(
 						None => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						},
+						}
 					};
 					let peer_pubkey = match PublicKey::from_slice(&peer_pubkey_vec) {
 						Ok(peer_pubkey) => peer_pubkey,
 						Err(_) => {
 							println!("\rERROR: couldn't parse peer_pubkey");
 							continue;
-						},
+						}
 					};
 
 					force_close_channel(channel_id, peer_pubkey, channel_manager.clone());
-				},
+				}
 				"nodeinfo" => node_info(&channel_manager, &peer_manager),
 				"listpeers" => list_peers(ldk_data_dir.clone()),
 				"signmessage" => {
@@ -697,7 +628,7 @@ pub(crate) fn poll_for_user_input(
 							&keys_manager.get_node_secret_key()
 						)
 					);
-				},
+				}
 				"sendonionmessage" => {
 					let path_pks_str = words.next();
 					if path_pks_str.is_none() {
@@ -715,7 +646,7 @@ pub(crate) fn poll_for_user_input(
 								println!("\rERROR: couldn't parse peer_pubkey");
 								errored = true;
 								break;
-							},
+							}
 						};
 						let node_pubkey = match PublicKey::from_slice(&node_pubkey_vec) {
 							Ok(peer_pubkey) => peer_pubkey,
@@ -723,7 +654,7 @@ pub(crate) fn poll_for_user_input(
 								println!("\rERROR: couldn't parse peer_pubkey");
 								errored = true;
 								break;
-							},
+							}
 						};
 						intermediate_nodes.push(node_pubkey);
 					}
@@ -735,14 +666,14 @@ pub(crate) fn poll_for_user_input(
 						_ => {
 							println!("\rNeed an integral message type above 64");
 							continue;
-						},
+						}
 					};
 					let data = match words.next().map(|s| hex_utils::to_vec(s)) {
 						Some(Some(data)) => data,
 						_ => {
 							println!("\rNeed a hex data string");
 							continue;
-						},
+						}
 					};
 					let destination = Destination::Node(intermediate_nodes.pop().unwrap());
 					match onion_messenger.send_onion_message(
@@ -750,7 +681,7 @@ pub(crate) fn poll_for_user_input(
 						destination,
 						None,
 					) {
-						Ok(()) => println!("\rSUCCESS: forwarded onion message to first hop"),
+						Ok(_) => println!("\rSUCCESS: forwarded onion message to first hop"),
 						Err(e) => println!("\rERROR: failed to send onion message: {:?}", e),
 					}
 				}
@@ -991,7 +922,7 @@ fn node_info(channel_manager: &Arc<ChannelManager>, peer_manager: &Arc<PeerManag
 	println!("\r\t num_usable_channels: {}", chans.iter().filter(|c| c.is_usable).count());
 	let local_balance_msat = chans.iter().map(|c| c.balance_msat).sum::<u64>();
 	println!("\r\t local_balance_msat: {}", local_balance_msat);
-	println!("\r\t num_peers: {}", peer_manager.get_peer_node_ids().len());
+	println!("\r\t num_peers: {}", peer_manager.list_peers().len());
 	println!("\r}}");
 }
 
@@ -1184,8 +1115,8 @@ fn list_payments(inbound_payments: &PaymentInfoStorage, outbound_payments: &Paym
 pub(crate) async fn connect_peer_if_necessary(
 	pubkey: PublicKey, peer_addr: SocketAddr, peer_manager: Arc<PeerManager>,
 ) -> Result<(), ()> {
-	for peer_details in peer_manager.list_peers() {
-		if peer_details.counterparty_node_id == pubkey {
+	for peer in peer_manager.list_peers() {
+		if peer.counterparty_node_id == pubkey {
 			return Ok(());
 		}
 	}
@@ -1208,11 +1139,16 @@ pub(crate) async fn do_connect_peer(
 					_ = &mut connection_closed_future => return Err(()),
 					_ = tokio::time::sleep(Duration::from_millis(10)) => {},
 				}
-				if peer_manager.get_peer_node_ids().iter().find(|(id, _)| *id == pubkey).is_some() {
+				if peer_manager
+					.list_peers()
+					.iter()
+					.find(|details| details.counterparty_node_id == pubkey)
+					.is_some()
+				{
 					return Ok(());
 				}
 			}
-		},
+		}
 		None => Err(()),
 	}
 }
@@ -1231,8 +1167,8 @@ fn do_disconnect_peer(
 	}
 
 	//check the pubkey matches a valid connected peer
-	let peers = peer_manager.get_peer_node_ids();
-	if !peers.iter().any(|(pk, _)| &pubkey == pk) {
+	let peers = peer_manager.list_peers();
+	if !peers.iter().any(|peer| pubkey == peer.counterparty_node_id) {
 		println!("\rError: Could not find peer {}", pubkey);
 		return Err(());
 	}
@@ -1251,6 +1187,7 @@ fn open_channel(
 		0,
 		0,
 		yuv_pixel,
+		None,
 		Some(config),
 	) {
 		Ok(_) => {
@@ -1266,12 +1203,13 @@ fn open_channel(
 
 fn send_payment(
 	channel_manager: &ChannelManager, invoice: &Bolt11Invoice, required_amount_msat: Option<u64>,
-	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_id = PaymentId((*invoice.payment_hash()).to_byte_array());
 	let payment_secret = Some(*invoice.payment_secret());
 	let zero_amt_invoice =
 		invoice.amount_milli_satoshis().is_none() || invoice.amount_milli_satoshis() == Some(0);
+
 	let pay_params_opt = if zero_amt_invoice {
 		if let Some(amt_msat) = required_amount_msat {
 			payment_parameters_from_zero_amount_invoice(invoice, amt_msat)
@@ -1292,16 +1230,18 @@ fn send_payment(
 		}
 		payment_parameters_from_invoice(invoice)
 	};
+
 	let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
 		Ok(res) => res,
 		Err(e) => {
 			println!("Failed to parse invoice: {:?}", e);
 			print!("> ");
 			return;
-		},
+		}
 	};
+
 	outbound_payments.payments.insert(
-		payment_id,
+		payment_hash,
 		PaymentInfo {
 			preimage: None,
 			secret: payment_secret,
@@ -1311,7 +1251,6 @@ fn send_payment(
 		},
 	);
 	fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-
 	match channel_manager.send_payment(
 		payment_hash,
 		recipient_onion,
@@ -1319,7 +1258,7 @@ fn send_payment(
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
-		Ok(_) => {
+		Ok(_payment_id) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
 			let amt_msat = invoice.amount_milli_satoshis().unwrap();
 			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
@@ -1328,23 +1267,23 @@ fn send_payment(
 			println!("\rERROR: failed to send payment: {:?}", e);
 			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-		},
+		}
 	};
 }
 
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	outbound_payments: &mut OutboundPaymentInfoStorage, fs_store: Arc<FilesystemStore>,
+	outbound_payments: &mut PaymentInfoStorage, fs_store: Arc<FilesystemStore>,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
-	let payment_id = PaymentId(Sha256::hash(&payment_preimage.0[..]).to_byte_array());
+	let payment_hash = PaymentHash::from(payment_preimage);
 
 	let route_params = RouteParameters::from_payment_params_and_value(
 		PaymentParameters::for_keysend(payee_pubkey, 40, false),
 		amt_msat,
 	);
 	outbound_payments.payments.insert(
-		payment_id,
+		payment_hash,
 		PaymentInfo {
 			preimage: None,
 			secret: None,
@@ -1357,7 +1296,7 @@ fn keysend<E: EntropySource>(
 	match channel_manager.send_spontaneous_payment_with_retry(
 		Some(payment_preimage),
 		RecipientOnionFields::spontaneous_empty(),
-		payment_id,
+		PaymentId(payment_hash.0),
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
 	) {
@@ -1368,7 +1307,7 @@ fn keysend<E: EntropySource>(
 			println!("\rERROR: failed to send payment: {:?}", e);
 			outbound_payments.payments.get_mut(&payment_hash).unwrap().status = HTLCStatus::Failed;
 			fs_store.write("", "", OUTBOUND_PAYMENTS_FNAME, &outbound_payments.encode()).unwrap();
-		},
+		}
 	};
 }
 
@@ -1379,9 +1318,13 @@ fn get_invoice(
 ) {
 	let currency = match network {
 		Network::Bitcoin => Currency::Bitcoin,
+		Network::Testnet => Currency::BitcoinTestnet,
 		Network::Regtest => Currency::Regtest,
 		Network::Signet => Currency::Signet,
-		Network::Testnet | _ => Currency::BitcoinTestnet,
+		_ => {
+			println!("\rERROR: unsupported network");
+			return;
+		}
 	};
 
 	let duration = SystemTime::now()
@@ -1419,14 +1362,14 @@ fn get_invoice(
 		Ok(inv) => {
 			println!("\rSUCCESS: generated invoice: {}", inv);
 			inv
-		},
+		}
 		Err(e) => {
 			println!("\rERROR: failed to create invoice: {:?}", e);
 			return;
-		},
+		}
 	};
 
-	let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
+	let payment_hash = PaymentHash(*invoice.payment_hash().as_byte_array());
 	inbound_payments.payments.insert(
 		payment_hash,
 		PaymentInfo {

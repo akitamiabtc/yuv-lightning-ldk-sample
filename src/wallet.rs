@@ -1,24 +1,29 @@
 use crate::disk::FilesystemLogger;
+use bdk::blockchain::AnyBlockchain;
 use bdk::wallet::AddressIndex;
 use bdk::SignOptions;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Script, Transaction};
+use bitcoin::{ScriptBuf, Transaction};
 use eyre::Context;
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::log_error;
 use lightning::util::logger::Logger;
 use std::collections::HashMap;
 use std::sync::Arc;
+use ydk::bitcoin_provider::BitcoinProvider;
+use ydk::types::FeeRateStrategy;
 use ydk::wallet::WalletConfig as MemoryWalletConfig;
 use ydk::wallet::{MemoryWallet, SyncOptions};
+use ydk::AnyBitcoinProvider;
 use yuv_pixels::{Chroma, Pixel};
 use yuv_types::YuvTransaction;
 
 #[derive(Clone)]
 pub(crate) struct Wallet {
 	ydk_wallet: MemoryWallet,
+	blockchain: Arc<AnyBlockchain>,
 	logger: Arc<FilesystemLogger>,
 }
 
@@ -34,6 +39,9 @@ impl Wallet {
 		// a dummy URL as it will be parsed, and we can't pass an empty string.
 		config.yuv_url = if !sync_yuv_wallet { DUMMY_YUV_URL.to_string() } else { config.yuv_url };
 
+		let bitcoin_provider: AnyBitcoinProvider =
+			BitcoinProvider::from_config(config.clone().try_into()?)?;
+
 		let ydk_wallet =
 			ydk::Wallet::from_config(config).await.wrap_err("failed to initialize wallet")?;
 
@@ -41,7 +49,7 @@ impl Wallet {
 
 		ydk_wallet.sync(options).await.wrap_err("failed to sync wallet")?;
 
-		Ok(Self { ydk_wallet, logger })
+		Ok(Self { ydk_wallet, logger, blockchain: bitcoin_provider.blockchain() })
 	}
 }
 
@@ -63,13 +71,13 @@ impl Wallet {
 				funding_holder_pubkey,
 				funding_counterparty_pubkey,
 				channel_value_satoshis,
-				None,
+				Some(FeeRateStrategy::TryEstimate { fee_rate: 1.1, target: 2 }),
 			)
 			.await
 	}
 
 	pub fn new_funding_tx(
-		&self, output_script: Script, channel_value_satoshis: u64,
+		&self, output_script: ScriptBuf, channel_value_satoshis: u64,
 	) -> eyre::Result<Transaction> {
 		// SAFETY: it's okay as we are not accessing the wallet's DB directly as
 		// suggested by the note in ydk.
@@ -77,7 +85,13 @@ impl Wallet {
 		let bdk_wallet_guard = bdk_wallet.read().unwrap();
 
 		let mut tx_builder = bdk_wallet_guard.build_tx();
-		tx_builder.add_recipient(output_script, channel_value_satoshis);
+
+		let fee_rate_strategy = FeeRateStrategy::TryEstimate { fee_rate: 1.1, target: 2 };
+		let fee_rate = fee_rate_strategy
+			.get_fee_rate(&self.blockchain)
+			.wrap_err("failed to estimate fee rate")?;
+
+		tx_builder.add_recipient(output_script, channel_value_satoshis).fee_rate(fee_rate);
 
 		let (mut psbt, _tx_details) = tx_builder.finish().wrap_err("failed to build funding tx")?;
 
@@ -91,7 +105,9 @@ impl Wallet {
 	pub async fn get_yuv_balances(&self) -> eyre::Result<HashMap<Chroma, u128>> {
 		self.ydk_wallet.sync(SyncOptions::default()).await.wrap_err("failed to sync ydk wallet")?;
 
-		Ok(self.ydk_wallet.balances())
+		let balances = self.ydk_wallet.balances().await?;
+
+		Ok(balances.yuv)
 	}
 
 	pub async fn new_yuv_transfer(
@@ -131,7 +147,7 @@ impl WalletSource for Wallet {
 		Ok(ldk_utxos)
 	}
 
-	fn get_change_script(&self) -> Result<Script, ()> {
+	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
 		let bdk_wallet = unsafe { self.ydk_wallet.bitcoin_wallet() };
 		let bdk_wallet_guard = bdk_wallet.read().unwrap();
 
@@ -142,11 +158,11 @@ impl WalletSource for Wallet {
 		Ok(address_info.script_pubkey())
 	}
 
-	fn sign_tx(&self, tx: Transaction) -> Result<Transaction, ()> {
-		let mut psbt = PartiallySignedTransaction::from_unsigned_tx(tx).map_err(|err| {
-			log_error!(&self.logger, "Failed to get psbt from tx: {err}");
-		})?;
+	fn get_change_yuv_pubkey(&self) -> Result<PublicKey, ()> {
+		Ok(self.ydk_wallet.public_key().inner)
+	}
 
+	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
 		let bdk_wallet = unsafe { self.ydk_wallet.bitcoin_wallet() };
 		let bdk_wallet_guard = bdk_wallet.read().unwrap();
 
@@ -156,8 +172,4 @@ impl WalletSource for Wallet {
 
 		Ok(psbt.extract_tx())
 	}
-
-	fn get_change_yuv_pubkey(&self) -> Result<PublicKey, ()> {
-       	Ok(self.ydk_wallet.public_key().inner)
-    }
 }

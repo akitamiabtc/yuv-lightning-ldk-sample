@@ -4,15 +4,15 @@ use crate::yuv_client::YuvClient;
 use crate::BitcoindClient;
 use crate::ChannelManager;
 use crate::FilesystemLogger;
+use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{LockTime, PackedLockTime};
 use bitcoin_client::RawTx;
 use lightning::chain::chaininterface::{
 	BroadcasterInterface, ConfirmationTarget, FeeEstimator, YuvBroadcaster,
 };
 use lightning::events::bump_transaction::WalletSource;
 use lightning::log_info;
-use lightning::sign::{EntropySource, KeysManager, SpendableOutputDescriptor};
+use lightning::sign::{EntropySource, KeysManager, OutputSpender, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, WithoutLength, Writeable};
@@ -104,7 +104,7 @@ pub(crate) async fn periodic_sweep(
 					match file.read_exact(&mut [0; 1]) {
 						Ok(_) => {
 							file.seek(SeekFrom::Current(-1)).unwrap();
-						},
+						}
 						Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
 						Err(e) => Err(e).unwrap(),
 					}
@@ -117,13 +117,13 @@ pub(crate) async fn periodic_sweep(
 					continue;
 				};
 				let output_descriptors = &outputs.iter().collect::<Vec<_>>();
-				let tx_feerate =
-					bitcoind_client.get_est_sat_per_1000_weight(ConfirmationTarget::Background);
+				let tx_feerate = bitcoind_client
+					.get_est_sat_per_1000_weight(ConfirmationTarget::ChannelCloseMinimum);
 
 				// We set nLockTime to the current height to discourage fee sniping.
-				let cur_height = channel_manager.current_best_block().height();
-				let locktime: PackedLockTime =
-					LockTime::from_height(cur_height).map_or(PackedLockTime::ZERO, |l| l.into());
+				let cur_height = channel_manager.current_best_block().height;
+				let locktime =
+					LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l.into());
 
 				match keys_manager.spend_yuv_spendable_outputs(
 					output_descriptors,

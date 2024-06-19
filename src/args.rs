@@ -36,11 +36,11 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		Some(Err(_)) => {
 			ldk_peer_port_set = false;
 			9735
-		},
+		}
 		None => {
 			ldk_peer_port_set = false;
 			9735
-		},
+		}
 	};
 
 	let mut arg_idx: usize = match ldk_peer_port_set {
@@ -53,7 +53,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		Some("signet") => Network::Signet,
 		Some(net) => {
 			panic!("Unsupported network provided. Options are: `regtest`, `testnet`, and `signet`. Got {}", net);
-		},
+		}
 		None => Network::Testnet,
 	};
 
@@ -82,7 +82,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 			let mut bytes = [0; 32];
 			bytes[..s.len()].copy_from_slice(s.as_bytes());
 			bytes
-		},
+		}
 		None => [0; 32],
 	};
 

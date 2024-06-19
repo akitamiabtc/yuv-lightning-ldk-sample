@@ -7,11 +7,12 @@ use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
+use bitcoin::constants::ChainHash;
 use bitcoin::hash_types::{BlockHash, Txid};
-use bitcoin::util::address::Address;
+use bitcoin::{Address, Network};
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning::log_error;
-use lightning::sign::ChangeDestinationSource;
+use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::Logger;
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::rpc::RpcClient;
@@ -49,18 +50,18 @@ impl BlockSource for BitcoindClient {
 		Box::pin(async move { self.bitcoind_rpc_client.get_block(header_hash).await })
 	}
 
-	fn get_best_block<'a>(&'a self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
+	fn get_best_block(&self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
 		Box::pin(async move { self.bitcoind_rpc_client.get_best_block().await })
 	}
 }
 
 /// The minimum feerate we are allowed to send, as specify by LDK.
-const MIN_FEERATE: u32 = 300;
+const MIN_FEERATE: u32 = 254;
 
 impl BitcoindClient {
 	pub(crate) async fn new(
-		host: String, port: u16, rpc_user: String, rpc_password: String, wallet_name: String,
-		handle: tokio::runtime::Handle, logger: Arc<FilesystemLogger>,
+		host: String, port: u16, rpc_user: String, rpc_password: String, network: Network,
+		wallet_name: String, handle: tokio::runtime::Handle, logger: Arc<FilesystemLogger>,
 	) -> std::io::Result<Self> {
 		let http_endpoint = HttpEndpoint::for_host(host.clone()).with_port(port);
 		let rpc_credentials =
@@ -94,6 +95,7 @@ impl BitcoindClient {
 			rpc_user,
 			rpc_password,
 			wallet_name,
+			network,
 			fees: Arc::new(fees),
 			handle: handle.clone(),
 			logger,
@@ -237,11 +239,7 @@ impl BitcoindClient {
 			// change address or to a new channel output negotiated with the same node.
 			"replaceable": false,
 		});
-
-		println!("\r{:?}", raw_tx);
-
-		self.wallet_rpc_client()
-			.unwrap()
+		self.bitcoind_rpc_client
 			.call_method("fundrawtransaction", &[raw_tx_json, options])
 			.await
 			.unwrap()
@@ -257,8 +255,7 @@ impl BitcoindClient {
 
 	pub async fn sign_raw_transaction_with_wallet(&self, tx_hex: String) -> SignedTx {
 		let tx_hex_json = serde_json::json!(tx_hex);
-		self.wallet_rpc_client()
-			.unwrap()
+		self.bitcoind_rpc_client
 			.call_method("signrawtransactionwithwallet", &vec![tx_hex_json])
 			.await
 			.unwrap()
@@ -267,8 +264,7 @@ impl BitcoindClient {
 	pub async fn get_new_address(&self) -> Address {
 		let addr_args = vec![serde_json::json!("LDK output address")];
 		let addr = self
-			.wallet_rpc_client()
-			.unwrap()
+			.bitcoind_rpc_client
 			.call_method::<NewAddress>("getnewaddress", &addr_args)
 			.await
 			.unwrap();
@@ -283,8 +279,7 @@ impl BitcoindClient {
 	}
 
 	pub async fn list_unspent(&self) -> ListUnspentResponse {
-		self.wallet_rpc_client()
-			.unwrap()
+		self.bitcoind_rpc_client
 			.call_method::<ListUnspentResponse>("listunspent", &vec![])
 			.await
 			.unwrap()
@@ -312,30 +307,29 @@ impl BroadcasterInterface for BitcoindClient {
 				match bitcoind_rpc_client
 					.call_method::<Txid>("sendrawtransaction", &vec![tx_json])
 					.await
-					{
-						Ok(_) => {}
-						Err(e) => {
-							let err_str = e.get_ref().unwrap().to_string();
-							log_error!(logger,
+				{
+					Ok(_) => {}
+					Err(e) => {
+						let err_str = e.get_ref().unwrap().to_string();
+						log_error!(logger,
 									   "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\nTransaction: {}",
 									   err_str,
 									   tx_serialized);
-							print!("\rWarning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
-						}
+						print!("Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {}\n> ", err_str);
 					}
+				}
 			});
 		}
 	}
 }
 
-impl ChangeDestinationSource for BitcoindClient {
-	fn get_change_destination_script(&self) -> Result<ScriptBuf, ()> {
-		tokio::task::block_in_place(move || {
-			Ok(self.handle.block_on(async move { self.get_new_address().await.script_pubkey() }))
-		})
+impl UtxoLookup for BitcoindClient {
+	fn get_utxo(&self, _genesis_hash: &ChainHash, _short_channel_id: u64) -> UtxoResult {
+		// P2PGossipSync takes None for a UtxoLookup, so this will never be called.
+		todo!();
 	}
 
-	fn get_utxo_with_yuv(&self, _genesis_hash: &BlockHash, _short_channel_id: u64) -> UtxoResult {
+	fn get_utxo_with_yuv(&self, _genesis_hash: &ChainHash, _short_channel_id: u64) -> UtxoResult {
 		todo!()
 	}
 }
