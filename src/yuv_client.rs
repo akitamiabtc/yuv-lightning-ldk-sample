@@ -9,7 +9,7 @@ use lightning_block_sync::AsyncYuvSourceResult;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use yuv_rpc_api::transactions::EmulateYuvTransactionResponse;
-use yuv_rpc_api::transactions::{GetRawYuvTransactionResponse, YuvTransactionsRpcClient};
+use yuv_rpc_api::transactions::{GetRawYuvTransactionResponseHex, YuvTransactionsRpcClient};
 use yuv_types::YuvTransaction;
 
 pub struct YuvClient {
@@ -31,7 +31,7 @@ impl YuvClient {
 	pub async fn get_list_raw_yuv_transactions(&self, txids: Vec<Txid>) -> Vec<YuvTransaction> {
 		let logger = self.logger.clone();
 		match self.client.get_list_raw_yuv_transactions(txids.clone()).await {
-			Ok(yuv_txs) => yuv_txs,
+			Ok(yuv_txs) => yuv_txs.into_iter().map(|tx| YuvTransaction::from(tx)).collect(),
 			Err(err) => {
 				log_error!(
 					logger,
@@ -92,12 +92,12 @@ impl YuvBroadcaster for YuvClient {
 impl YuvTransactionSource for YuvClient {
 	fn yuv_transaction_by_id<'a>(
 		&'a self, txid: &'a Txid,
-	) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponse> {
+	) -> AsyncYuvSourceResult<'a, GetRawYuvTransactionResponseHex> {
 		let logger = self.logger.clone();
 		let client = self.client.clone();
 
 		Box::pin(async move {
-			client.get_raw_yuv_transaction(*txid).await.map_err(|err| {
+			client.get_yuv_transaction(*txid).await.map_err(|err| {
 				log_error!(
 					logger,
 					"Error, failed to getrawyuvtransaction: {err}\nTx id: {:?}",
