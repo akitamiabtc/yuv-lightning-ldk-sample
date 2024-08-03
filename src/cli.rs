@@ -29,6 +29,7 @@ use lightning_invoice::payment::{
 use lightning_invoice::{utils, Bolt11Invoice, Currency};
 use lightning_persister::fs_store::FilesystemStore;
 use std::env;
+use std::fmt::Debug;
 use std::io::{stdout, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
@@ -893,10 +894,6 @@ fn help() {
 	println!("\r\t      disconnectpeer <peer_pubkey>");
 	println!("\r\t      listpeers");
 	println!("\r\n\t  Payments:");
-	// println!("\r      sendhtlc <final_cltv_expiry> <amount_msats> [--yuv_amount=] <destination>");
-	// println!(
-	// 	"\r      sendalongpath <final_cltv_expiry> <amount_msats> [--yuv_amount=] <node_id...>"
-	// );
 	println!("\r\t      keysend <dest_pubkey> <amt_msats>");
 	println!("\r\t      listpayments");
 	println!("\r\n\t  Invoices:");
@@ -1231,7 +1228,7 @@ fn send_payment(
 		payment_parameters_from_invoice(invoice)
 	};
 
-	let (payment_hash, recipient_onion, route_params) = match pay_params_opt {
+	let (payment_hash, recipient_onion, mut route_params) = match pay_params_opt {
 		Ok(res) => res,
 		Err(e) => {
 			println!("Failed to parse invoice: {:?}", e);
@@ -1239,6 +1236,9 @@ fn send_payment(
 			return;
 		}
 	};
+
+	// FIXME: remove it after tests are done.
+	route_params.max_total_routing_fee_msat = None;
 
 	outbound_payments.payments.insert(
 		payment_hash,
@@ -1261,7 +1261,11 @@ fn send_payment(
 		Ok(_payment_id) => {
 			let payee_pubkey = invoice.recover_payee_pub_key();
 			let amt_msat = invoice.amount_milli_satoshis().unwrap();
+			let pixel_opt = invoice.yuv_pixel();
 			println!("\rEVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
+			if let Some(pixel) = pixel_opt {
+				println!("... with yuv amount {} chroma {}", pixel.luma.amount, pixel.chroma);
+			}
 		}
 		Err(e) => {
 			println!("\rERROR: failed to send payment: {:?}", e);

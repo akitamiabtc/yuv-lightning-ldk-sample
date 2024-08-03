@@ -210,15 +210,29 @@ async fn handle_ldk_events(
 			let mut wallet = wallet.lock().await;
 
 			let (final_tx, yuv_proofs) = if let Some(funding_pixel) = funding_yuv_pixel {
-				let yuv_tx = wallet
+				let yuv_tx_res = wallet
 					.new_yuv_funding_tx(
 						funding_pixel,
 						funding_holder_pubkey,
 						funding_counterparty_pubkey,
 						channel_value_satoshis,
 					)
-					.await
-					.unwrap();
+					.await;
+
+				let yuv_tx = match yuv_tx_res {
+					Ok(yuv) => yuv,
+					Err(err) => {
+						eprintln!("ERROR: Closing channel. Failed to create funding transaction: {err:#?}");
+
+						if let Err(err) = channel_manager.force_close_without_broadcasting_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+						) {
+							eprintln!("ERROR: failed to force close channel: {err:?}");
+						}
+						return;
+					}
+				};
 
 				(yuv_tx.bitcoin_tx, Some(yuv_tx.tx_type))
 			} else {

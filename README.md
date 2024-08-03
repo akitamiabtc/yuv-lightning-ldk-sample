@@ -39,7 +39,7 @@ at your option.
 
 ## For example, settuping 4 nodes:
 
-``` shell
+```shell
 cargo install --path .
 ```
 
@@ -51,19 +51,19 @@ yuv-ln-node admin1:123@127.0.0.1:18443 ./volumes.dev/8006/ cQb7JarJTBoeu6eLvyDnH
 
 Bob:
 
-``` shell
+```shell
 yuv-ln-node admin1:123@127.0.0.1:18443 ./volumes.dev/8007/ cUrMc62nnFeQuzXb26KPizCJQPp7449fsPsqn5NCHTwahSvqqRkV 8007 regtest yuv-node-8007 http://127.0.0.1:18335 127.0.0.1:8007
 ```
 
 Carol:
 
-``` shell
+```shell
 yuv-ln-node admin1:123@127.0.0.1:18443 ./volumes.dev/8008/ cUrvVCz1YKAwX6JLRhvacMWtkiLxHkTZbqEXu64Q4KySPcVrXuLu 8008 regtest yuv-node-8008 http://127.0.0.1:18336 127.0.0.1:8008
 ```
 
 Dan:
 
-``` shell
+```shell
 yuv-ln-node admin1:123@127.0.0.1:18443 ./volumes.dev/8009/ cUCcbqBwTHBH98qH4ghfP4DW6nHvh8VSuqiSveXSRgHyNVLAKXnn 8009 regtest yuv-node-8009 http://127.0.0.1:18333 127.0.0.1:8009
 ```
 

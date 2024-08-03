@@ -31,7 +31,10 @@ impl YuvClient {
 	pub async fn get_list_raw_yuv_transactions(&self, txids: Vec<Txid>) -> Vec<YuvTransaction> {
 		let logger = self.logger.clone();
 		match self.client.get_list_raw_yuv_transactions(txids.clone()).await {
-			Ok(yuv_txs) => yuv_txs.into_iter().map(|tx| YuvTransaction::from(tx)).collect(),
+			Ok(yuv_txs) => yuv_txs
+				.into_iter()
+				.map(|tx_raw| YuvTransaction::new(tx_raw.bitcoin_tx.bitcoin_tx, tx_raw.tx_type))
+				.collect(),
 			Err(err) => {
 				log_error!(
 					logger,

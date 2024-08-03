@@ -1,6 +1,6 @@
 [package]
 name = "yuv-ln-node"
-version = "0.2.0"
+version = "0.3.1"
 authors = ["Valentine Wallace <vwallace@protonmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2021"
@@ -24,44 +24,44 @@ thiserror = { version = "1.0", default-features = false }
 eyre = { version = "0.6.8" }
 jsonrpsee = { version = "0.20.3" }
 
-bdk = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4", features = ["rpc", "std"], default-features = false }
-ydk = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4" }
-yuv-storage = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4" }
-yuv-types = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4" }
-yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4" }
-yuv-rpc-api = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4", features = ["client"] }
-bitcoin-client = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.4" }
+bdk = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6", features = ["rpc", "std"], default-features = false }
+ydk = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6" }
+yuv-storage = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6" }
+yuv-types = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6" }
+yuv-pixels = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6" }
+yuv-rpc-api = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6", features = ["client"] }
+bitcoin-client = { git = "https://github.com/akitamiabtc/yuv.git", tag = "v0.3.6" }
 
 [dependencies.lightning]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 features = ["max_level_trace"]
 
 [dependencies.lightning-block-sync]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 features = ["rpc-client", "tokio"]
 
 [dependencies.lightning-invoice]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 
 [dependencies.lightning-net-tokio]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 
 [dependencies.lightning-persister]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 
 [dependencies.lightning-background-processor]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 features = ["futures"]
 
 [dependencies.lightning-rapid-gossip-sync]
 git = "https://github.com/akitamiabtc/yuv-lightning.git"
-tag = "v0.3.0+lightning-0.0.123"
+tag = "v0.3.1+lightning-0.0.123"
 
 [profile.release]
 panic = "abort"

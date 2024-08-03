@@ -141,7 +141,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 [[package]]
 name = "bdk"
 version = "0.29.0+fix.1"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "ahash 0.7.8",
  "async-trait",
@@ -220,13 +220,13 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-client"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "async-trait",
  "bitcoin",
  "bitcoin-private",
- "jsonrpc 0.3.4",
+ "jsonrpc 0.3.5",
  "log",
  "serde",
  "serde_json",
@@ -306,8 +306,8 @@ checksum = "b4ae4235e6dac0694637c763029ecea1a2ec9e4e06ec2729bd21ba4d9c863eb7"
 
 [[package]]
 name = "bulletproof"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "bitcoin",
  "eyre",
@@ -699,8 +699,8 @@ dependencies = [
 
 [[package]]
 name = "event-bus"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "event-bus-macros",
  "flume",
@@ -708,8 +708,8 @@ dependencies = [
 
 [[package]]
 name = "event-bus-macros"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "quote",
  "syn 2.0.66",
@@ -1227,8 +1227,8 @@ dependencies = [
 
 [[package]]
 name = "jsonrpc"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -1405,8 +1405,8 @@ dependencies = [
 
 [[package]]
 name = "lightning"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bitcoin",
  "hex-conservative",
@@ -1417,8 +1417,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-background-processor"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -1427,8 +1427,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-block-sync"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
@@ -1443,8 +1443,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-invoice"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bech32 0.9.1",
  "bitcoin",
@@ -1456,8 +1456,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-net-tokio"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -1466,8 +1466,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-persister"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -1476,8 +1476,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-rapid-gossip-sync"
-version = "0.3.0"
-source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.0+lightning-0.0.123#3d51ba1012435f5c29a327925e7d4553d3a59ba5"
+version = "0.3.1"
+source = "git+https://github.com/akitamiabtc/yuv-lightning.git?tag=v0.3.1+lightning-0.0.123#259f597c3812e51af38d75b1304aca92fdc6acde"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -3014,8 +3014,8 @@ dependencies = [
 
 [[package]]
 name = "ydk"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "bdk",
  "bitcoin",
@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "yuv-ln-node"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.21.7",
  "bdk",
@@ -3072,8 +3072,8 @@ dependencies = [
 
 [[package]]
 name = "yuv-pixels"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "bitcoin",
  "core2 0.3.3",
@@ -3085,8 +3085,8 @@ dependencies = [
 
 [[package]]
 name = "yuv-rpc-api"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "async-trait",
  "bitcoin",
@@ -3099,8 +3099,8 @@ dependencies = [
 
 [[package]]
 name = "yuv-storage"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "async-trait",
  "bitcoin",
@@ -3117,8 +3117,8 @@ dependencies = [
 
 [[package]]
 name = "yuv-types"
-version = "0.3.4"
-source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.4#42ab409e521234c65098070ce2ffdc159bd33b25"
+version = "0.3.5"
+source = "git+https://github.com/akitamiabtc/yuv.git?tag=v0.3.6#7a29c898d9d7d356fb0b9870f640d2d0061d53eb"
 dependencies = [
  "bitcoin",
  "bitcoin-client",
